@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 import urllib.error
@@ -22,6 +23,8 @@ from app.env_config import load_env_file, save_env_values
 TTSCallback = Callable[[], None]
 _AUDIO_CLEANUP_DELAY_MS = 200
 _AUDIO_CLEANUP_MAX_ATTEMPTS = 5
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
+_CJK_TEXT_LANGS = {"ja", "all_ja", "zh", "all_zh", "ko", "all_ko", "yue", "all_yue"}
 
 
 @dataclass
@@ -454,7 +457,10 @@ class GPTSoVITSTTSProvider(QObject):
             reference = self._select_reference(tts_request.tone)
             payload = {
                 "text": tts_request.text,
-                "text_lang": self.settings.text_lang,
+                "text_lang": _resolve_request_text_lang(
+                    tts_request.text,
+                    self.settings.text_lang,
+                ),
                 "ref_audio_path": str(reference.ref_audio_path),
                 "prompt_text": reference.ref_text,
                 "prompt_lang": reference.ref_lang,
@@ -808,6 +814,14 @@ def _normalize_lang(lang: str) -> str:
     normalized = lang.strip().lower()
     if normalized == "ja":
         return "ja"
+    return normalized or "ja"
+
+
+def _resolve_request_text_lang(text: str, configured_text_lang: str) -> str:
+    """英文混入中日韩文本时切到 auto，避免 GPT-SoVITS 按单语 BERT 处理失败。"""
+    normalized = configured_text_lang.strip().lower()
+    if normalized in _CJK_TEXT_LANGS and _LATIN_LETTER_RE.search(text):
+        return "auto_yue" if normalized in {"yue", "all_yue"} else "auto"
     return normalized or "ja"
 
 
