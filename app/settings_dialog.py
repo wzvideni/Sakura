@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlparse
 
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -10,14 +11,36 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from app.api_client import ApiSettings
+from app.api_client import ApiSettings, OpenAICompatibleClient
 from app.tts import GPTSoVITSTTSSettings, TTSConfigError
+
+
+class ApiConnectionTestWorker(QObject):
+    succeeded = Signal(str)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, settings: ApiSettings) -> None:
+        super().__init__()
+        self.settings = settings
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            message = OpenAICompatibleClient(self.settings).test_connection()
+        except Exception as exc:  # UI 边界统一转成可读错误。
+            self.failed.emit(str(exc))
+        else:
+            self.succeeded.emit(message)
+        finally:
+            self.finished.emit()
 
 
 class SettingsDialog(QDialog):
@@ -33,6 +56,8 @@ class SettingsDialog(QDialog):
         self.tts_settings = tts_settings
         self.result_api_settings: ApiSettings | None = None
         self.result_tts_settings: GPTSoVITSTTSSettings | None = None
+        self._api_test_thread: QThread | None = None
+        self._api_test_worker: ApiConnectionTestWorker | None = None
 
         self.setWindowTitle("设置")
         self.resize(560, 360)
@@ -117,6 +142,9 @@ class SettingsDialog(QDialog):
         self.api_timeout_spin.setSuffix(" 秒")
         self.api_timeout_spin.setValue(settings.timeout_seconds)
 
+        self.api_test_button = QPushButton("测试 API", tab)
+        self.api_test_button.clicked.connect(self._test_api_settings)
+
         form_layout = QFormLayout()
         form_layout.setContentsMargins(16, 18, 16, 16)
         form_layout.setSpacing(12)
@@ -124,6 +152,7 @@ class SettingsDialog(QDialog):
         form_layout.addRow("API Key", self.api_key_edit)
         form_layout.addRow("模型", self.model_edit)
         form_layout.addRow("超时", self.api_timeout_spin)
+        form_layout.addRow("", self.api_test_button)
         tab.setLayout(form_layout)
         return tab
 
@@ -155,6 +184,10 @@ class SettingsDialog(QDialog):
         return tab
 
     def accept(self) -> None:
+        if self._api_test_thread is not None:
+            QMessageBox.information(self, "测试中", "API 测试仍在进行，请等待完成后再保存设置。")
+            return
+
         api_settings = self._validated_api_settings()
         if api_settings is None:
             return
@@ -165,6 +198,50 @@ class SettingsDialog(QDialog):
         self.result_api_settings = api_settings
         self.result_tts_settings = tts_settings
         super().accept()
+
+    def reject(self) -> None:
+        if self._api_test_thread is not None:
+            QMessageBox.information(self, "测试中", "API 测试仍在进行，请等待完成后再关闭设置。")
+            return
+        super().reject()
+
+    def _test_api_settings(self) -> None:
+        settings = self._validated_api_settings()
+        if settings is None or self._api_test_thread is not None:
+            return
+
+        self.api_test_button.setEnabled(False)
+        self.api_test_button.setText("测试中...")
+
+        thread = QThread(self)
+        worker = ApiConnectionTestWorker(settings)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._handle_api_test_success)
+        worker.failed.connect(self._handle_api_test_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._reset_api_test_state)
+
+        self._api_test_thread = thread
+        self._api_test_worker = worker
+        thread.start()
+
+    @Slot(str)
+    def _handle_api_test_success(self, message: str) -> None:
+        QMessageBox.information(self, "测试成功", f"API 连接成功，模型返回：{message}")
+
+    @Slot(str)
+    def _handle_api_test_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "测试失败", message)
+
+    @Slot()
+    def _reset_api_test_state(self) -> None:
+        self.api_test_button.setEnabled(True)
+        self.api_test_button.setText("测试 API")
+        self._api_test_thread = None
+        self._api_test_worker = None
 
     def _validated_api_settings(self) -> ApiSettings | None:
         base_url = self.base_url_edit.text().strip().rstrip("/")

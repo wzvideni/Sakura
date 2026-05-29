@@ -108,6 +108,35 @@ class OpenAICompatibleClient:
         """运行时更新 API 配置，供设置界面保存后立即生效。"""
         self.settings = settings
 
+    def test_connection(self) -> str:
+        """发送一次最小聊天请求，验证 Base URL、API Key 和模型是否可用。"""
+        if not self.settings.api_key:
+            raise ApiConfigError("缺少 API_KEY。请在设置中填写 API Key。")
+        if not self.settings.base_url:
+            raise ApiConfigError("缺少 BASE_URL。")
+        if not self.settings.model:
+            raise ApiConfigError("缺少 MODEL。")
+
+        payload = {
+            "model": self.settings.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Reply with only OK.",
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 8,
+        }
+        data = self._post_chat_completions(payload)
+
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ApiRequestError(f"API 返回格式无法解析：{json.dumps(data, ensure_ascii=False)}") from exc
+
+        return str(content).strip() or "OK"
+
     def chat(self, system_prompt: str, messages: list[dict[str, str]]) -> ChatReply:
         if not self.settings.api_key:
             raise ApiConfigError("缺少 API_KEY。请在 .env 中配置 API_KEY、BASE_URL、MODEL。")
@@ -127,6 +156,17 @@ class OpenAICompatibleClient:
             ],
             "temperature": 0.8,
         }
+        data = self._post_chat_completions(payload)
+
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ApiRequestError(f"API 返回格式无法解析：{json.dumps(data, ensure_ascii=False)}") from exc
+
+        return parse_chat_reply(str(content).strip())
+
+    def _post_chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """调用 OpenAI 兼容的 chat/completions 接口并返回 JSON 数据。"""
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             url=f"{self.settings.base_url}/chat/completions",
@@ -154,9 +194,8 @@ class OpenAICompatibleClient:
 
         try:
             data: dict[str, Any] = json.loads(response_body)
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
             raise ApiRequestError(f"API 返回格式无法解析：{response_body}") from exc
 
-        return parse_chat_reply(str(content).strip())
+        return data
 
