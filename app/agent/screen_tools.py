@@ -8,14 +8,17 @@ from app.agent.tool_registry import Tool
 OBSERVE_SCREEN_TOOL_NAME = "observe_screen"
 SCREEN_OBSERVATION_REQUEST_ACTION = "screen_observation_request"
 SCREEN_OBSERVATION_CAPABILITY = "screen_observation"
-SCREEN_OBSERVATION_DISABLED_ERROR = "模型视觉未启用，或本轮已经提供过屏幕截图。"
+SCREEN_OBSERVATION_DISABLED_ERROR = "自主屏幕观察未启用、模型视觉未启用，或本轮已经提供过屏幕截图。"
 
 
 def create_screen_observation_tool() -> Tool:
-    """创建屏幕观察请求工具；实际截图仍由 UI 层执行。"""
+    """创建自主屏幕观察请求工具；实际截图仍由 UI 层执行。"""
     return Tool(
         name=OBSERVE_SCREEN_TOOL_NAME,
-        description="请求获取当前屏幕截图。仅当用户问题需要当前界面、窗口内容或视觉状态时使用。",
+        description=(
+            "自主请求获取当前屏幕截图，用来理解主人当前窗口、屏幕内容、正在做什么、"
+            "是否卡住，或为主动搭话寻找具体画面话题。"
+        ),
         parameters={
             "type": "object",
             "properties": {},

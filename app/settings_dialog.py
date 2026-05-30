@@ -61,6 +61,7 @@ class SettingsDialog(QDialog):
         character_registry: CharacterRegistry | None = None,
         current_character: CharacterProfile | None = None,
         screen_observation_enabled: bool = True,
+        autonomous_screen_observation_enabled: bool = False,
         proactive_care_settings: ProactiveCareSettings | None = None,
         parent=None,  # type: ignore[no-untyped-def]
     ) -> None:
@@ -73,6 +74,7 @@ class SettingsDialog(QDialog):
         self.result_tts_settings: GPTSoVITSTTSSettings | None = None
         self.result_character_id: str | None = None
         self.result_screen_observation_enabled: bool | None = None
+        self.result_autonomous_screen_observation_enabled: bool | None = None
         self.result_proactive_care_settings: ProactiveCareSettings | None = None
         self._api_test_thread: QThread | None = None
         self._api_test_worker: ApiConnectionTestWorker | None = None
@@ -88,6 +90,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(
             self._build_privacy_tab(
                 screen_observation_enabled,
+                autonomous_screen_observation_enabled,
                 proactive_care_settings or ProactiveCareSettings(),
             ),
             "隐私",
@@ -232,11 +235,18 @@ class SettingsDialog(QDialog):
     def _build_privacy_tab(
         self,
         screen_observation_enabled: bool,
+        autonomous_screen_observation_enabled: bool,
         proactive_care_settings: ProactiveCareSettings,
     ) -> QWidget:
         tab = QWidget(self)
         self.screen_observation_enabled_check = QCheckBox("允许按需屏幕观察", tab)
         self.screen_observation_enabled_check.setChecked(screen_observation_enabled)
+
+        self.autonomous_screen_observation_enabled_check = QCheckBox("允许 Sakura 自主看屏幕", tab)
+        self.autonomous_screen_observation_enabled_check.setChecked(
+            screen_observation_enabled and autonomous_screen_observation_enabled
+        )
+        self.autonomous_screen_observation_enabled_check.setEnabled(screen_observation_enabled)
 
         self.proactive_care_enabled_check = QCheckBox("启用主动关怀", tab)
         self.proactive_care_enabled_check.setChecked(proactive_care_settings.enabled)
@@ -275,6 +285,7 @@ class SettingsDialog(QDialog):
         form_layout.setContentsMargins(16, 18, 16, 16)
         form_layout.setSpacing(12)
         form_layout.addRow("", self.screen_observation_enabled_check)
+        form_layout.addRow("", self.autonomous_screen_observation_enabled_check)
         form_layout.addRow("", self.proactive_care_enabled_check)
         form_layout.addRow("", self.proactive_screen_context_enabled_check)
         form_layout.addRow("主动检查间隔", self.proactive_check_interval_spin)
@@ -298,6 +309,10 @@ class SettingsDialog(QDialog):
         self.result_tts_settings = tts_settings
         self.result_character_id = self._selected_character_id()
         self.result_screen_observation_enabled = self.screen_observation_enabled_check.isChecked()
+        self.result_autonomous_screen_observation_enabled = (
+            self.screen_observation_enabled_check.isChecked()
+            and self.autonomous_screen_observation_enabled_check.isChecked()
+        )
         self.result_proactive_care_settings = ProactiveCareSettings(
             enabled=self.proactive_care_enabled_check.isChecked(),
             screen_context_enabled=(
@@ -355,8 +370,10 @@ class SettingsDialog(QDialog):
 
     @Slot(bool)
     def _sync_proactive_screen_context_enabled(self, screen_observation_enabled: bool) -> None:
+        self.autonomous_screen_observation_enabled_check.setEnabled(screen_observation_enabled)
         self.proactive_screen_context_enabled_check.setEnabled(screen_observation_enabled)
         if not screen_observation_enabled:
+            self.autonomous_screen_observation_enabled_check.setChecked(False)
             self.proactive_screen_context_enabled_check.setChecked(False)
 
     def _validated_api_settings(self) -> ApiSettings | None:

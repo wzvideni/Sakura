@@ -786,7 +786,7 @@ def test_trim_messages_for_model_keeps_recent_messages_without_mutating_history(
     assert len(messages) == MAX_MODEL_CONTEXT_MESSAGES + 5
 
 
-def test_model_vision_is_enabled_by_default_for_screen_observation() -> None:
+def test_autonomous_screen_observation_can_request_screen_without_explicit_user_command() -> None:
     class ScreenRequestClient:
         def __init__(self) -> None:
             self.prompts: list[str] = []
@@ -804,11 +804,33 @@ def test_model_vision_is_enabled_by_default_for_screen_observation() -> None:
         system_prompt="你是 Sakura。",
         tools=ToolRegistry([create_screen_observation_tool()]),
     )
-    result = runtime.handle_user_message([{"role": "user", "content": "这个界面哪里不对"}])
+    runtime.set_autonomous_screen_observation_enabled(True)
+    result = runtime.handle_user_message([{"role": "user", "content": "你觉得我现在是不是卡住了？"}])
 
     assert "observe_screen" in client.prompts[0]
     assert result.actions
     assert result.actions[0].type == SCREEN_OBSERVATION_REQUEST_ACTION
+
+
+def test_autonomous_screen_observation_disabled_hides_screen_tool() -> None:
+    class PromptCaptureClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def complete_raw(self, system_prompt, *_args, **_kwargs) -> str:  # type: ignore[no-untyped-def]
+            self.prompts.append(system_prompt)
+            return '{"reply":{"segments":[{"ja":"見えないよ。","zh":"我先不看屏幕。","tone":"中性"}]}}'
+
+    client = PromptCaptureClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=ToolRegistry([create_screen_observation_tool()]),
+    )
+
+    runtime.handle_user_message([{"role": "user", "content": "你觉得我现在是不是卡住了？"}])
+
+    assert OBSERVE_SCREEN_TOOL_NAME not in client.prompts[0]
 
 
 def test_model_vision_disabled_hides_screen_observation_tool() -> None:
@@ -826,6 +848,7 @@ def test_model_vision_disabled_hides_screen_observation_tool() -> None:
         system_prompt="你是 Sakura。",
         tools=ToolRegistry([create_screen_observation_tool()]),
     )
+    runtime.set_autonomous_screen_observation_enabled(True)
     runtime.set_model_vision_enabled(False)
 
     runtime.handle_user_message([{"role": "user", "content": "普通聊天"}])
@@ -848,6 +871,7 @@ def test_screen_observation_tool_hidden_after_image_is_attached() -> None:
         system_prompt="你是 Sakura。",
         tools=ToolRegistry([create_screen_observation_tool()]),
     )
+    runtime.set_autonomous_screen_observation_enabled(True)
     runtime.set_model_vision_enabled(True)
 
     runtime.handle_user_message(
@@ -888,6 +912,7 @@ def test_hidden_screen_observation_call_returns_failure_without_action() -> None
         system_prompt="你是 Sakura。",
         tools=ToolRegistry([create_screen_observation_tool()]),
     )
+    runtime.set_autonomous_screen_observation_enabled(True)
     runtime.set_model_vision_enabled(False)
 
     result = runtime.handle_user_message([{"role": "user", "content": "普通聊天"}])
@@ -1116,6 +1141,42 @@ def test_proactive_check_event_can_continue_tool_loop_after_tool_results() -> No
     assert len(client.prompts) == 2
     assert "主动检查事件" in client.prompts[0]
     assert "不要为了显得主动而循环调用工具" in client.prompts[0]
+
+
+def test_proactive_check_can_request_autonomous_screen_observation() -> None:
+    class ProactiveScreenClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def complete_raw(self, system_prompt, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompts.append(system_prompt)
+            return (
+                '{"reply":{"segments":[{"ja":"ちょっと見てみるね。","zh":"我稍微看一下。","tone":"中性"}]},'
+                '"tool_calls":[{"name":"observe_screen","arguments":{},"reason":"想看看主人现在在做什么"}]}'
+            )
+
+    client = ProactiveScreenClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=ToolRegistry([create_screen_observation_tool()]),
+    )
+    runtime.set_autonomous_screen_observation_enabled(True)
+
+    result = runtime.handle_event(
+        AgentEvent(
+            type="proactive_check",
+            payload={
+                "seconds_since_pet_interaction": 1800,
+                "screen_context_allowed": False,
+            },
+        )
+    )
+
+    assert "observe_screen" in client.prompts[0]
+    assert result.actions[0].type == "event"
+    assert result.actions[1].type == SCREEN_OBSERVATION_REQUEST_ACTION
+    assert result.actions[1].payload["reason"] == "想看看主人现在在做什么"
 
 
 def test_proactive_check_vision_unsupported_uses_safe_fallback() -> None:

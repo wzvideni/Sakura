@@ -68,6 +68,7 @@ from app.proactive_care import (
     ProactiveCareSettings,
 )
 from app.screen_observation import (
+    SCREEN_OBSERVATION_HISTORY_MARKER,
     append_observation_marker,
     build_screen_observation_user_message,
     capture_screen_observation,
@@ -91,6 +92,7 @@ SUBTITLE_LANGUAGE_KEY = "SUBTITLE_LANGUAGE"
 SUBTITLE_LANGUAGE_JA = "ja"
 SUBTITLE_LANGUAGE_ZH = "zh"
 SCREEN_OBSERVATION_ENABLED_KEY = "SCREEN_OBSERVATION_ENABLED"
+AUTONOMOUS_SCREEN_OBSERVATION_ENABLED_KEY = "AUTONOMOUS_SCREEN_OBSERVATION_ENABLED"
 
 
 class PetWindow(QWidget):
@@ -137,9 +139,13 @@ class PetWindow(QWidget):
         self.history_store = self._create_history_store(character_profile)
         self.subtitle_language = self._load_subtitle_language()
         self.screen_observation_enabled = self._load_screen_observation_enabled()
+        self.autonomous_screen_observation_enabled = self._load_autonomous_screen_observation_enabled()
         self.proactive_care_settings = ProactiveCareSettings.load(self.env_path)
         self.model_vision_enabled = self.screen_observation_enabled
         self.agent_runtime.set_model_vision_enabled(self.model_vision_enabled)
+        self.agent_runtime.set_autonomous_screen_observation_enabled(
+            self.autonomous_screen_observation_enabled
+        )
         self.free_access_enabled = self.tool_registry.free_access_enabled
         self.history_window: HistoryWindow | None = None
         self.messages: list[dict[str, Any]] = []
@@ -162,10 +168,13 @@ class PetWindow(QWidget):
         self.reply_advance_scheduled = False
         self.pending_tool_action: PendingToolAction | None = None
         self.pending_screen_observation_messages: list[dict[str, Any]] | None = None
+        self.pending_screen_observation_event: AgentEvent | None = None
+        self.pending_screen_observation_event_reminder_id: str | None = None
         self.screen_observation_followup_in_progress = False
         self.active_reminder_id: str | None = None
         self.active_reminder_text = ""
         self.active_event_type = ""
+        self.active_event: AgentEvent | None = None
         self.last_user_activity_at = time.perf_counter()
         self.last_proactive_care_at: float | None = None
         self.interaction_sequence = 0
@@ -196,6 +205,7 @@ class PetWindow(QWidget):
                 "tts_provider": type(tts_provider).__name__,
                 "subtitle_language": self.subtitle_language,
                 "screen_observation_enabled": self.screen_observation_enabled,
+                "autonomous_screen_observation_enabled": self.autonomous_screen_observation_enabled,
                 "proactive_care": self.proactive_care_settings,
             },
         )
@@ -631,6 +641,13 @@ class PetWindow(QWidget):
         vision_action.triggered.connect(self._toggle_model_vision)
         menu.addAction(vision_action)
 
+        autonomous_screen_action = QAction("允许自主看屏幕", self)
+        autonomous_screen_action.setCheckable(True)
+        autonomous_screen_action.setChecked(self.autonomous_screen_observation_enabled)
+        autonomous_screen_action.setEnabled(self.screen_observation_enabled and self.model_vision_enabled)
+        autonomous_screen_action.triggered.connect(self._toggle_autonomous_screen_observation)
+        menu.addAction(autonomous_screen_action)
+
         free_access_action = QAction("自由访问权限", self)
         free_access_action.setCheckable(True)
         free_access_action.setChecked(self.free_access_enabled)
@@ -862,12 +879,17 @@ class PetWindow(QWidget):
     def _queue_screen_observation_followup(self, result: AgentResult) -> bool:
         if not any(action.type == SCREEN_OBSERVATION_REQUEST_ACTION for action in result.actions):
             return False
-        if not self.screen_observation_enabled or not self.model_vision_enabled:
+        if (
+            not self.screen_observation_enabled
+            or not self.model_vision_enabled
+            or not self.autonomous_screen_observation_enabled
+        ):
             self._log_interaction_stage(
                 "screen_observation_disabled",
                 {
                     "screen_observation_enabled": self.screen_observation_enabled,
                     "model_vision_enabled": self.model_vision_enabled,
+                    "autonomous_screen_observation_enabled": self.autonomous_screen_observation_enabled,
                 },
             )
             debug_log(
@@ -876,6 +898,7 @@ class PetWindow(QWidget):
                 {
                     "screen_observation_enabled": self.screen_observation_enabled,
                     "model_vision_enabled": self.model_vision_enabled,
+                    "autonomous_screen_observation_enabled": self.autonomous_screen_observation_enabled,
                 },
             )
             self._consume_agent_result(_build_screen_observation_disabled_result())
@@ -899,6 +922,7 @@ class PetWindow(QWidget):
 
         observed_message = build_screen_observation_user_message(text, observation)
         self.messages[-1] = {"role": "user", "content": append_observation_marker(text, observation)}
+        self._record_history("system", SCREEN_OBSERVATION_HISTORY_MARKER)
         self.pending_screen_observation_messages = trim_messages_for_model(
             [*self.messages[:-1], observed_message]
         )
@@ -918,6 +942,85 @@ class PetWindow(QWidget):
         )
         self._log_interaction_stage(
             "screen_observation_captured",
+            {
+                "width": observation.width,
+                "height": observation.height,
+                "screen_name": observation.screen_name,
+            },
+        )
+        return True
+
+    def _queue_event_screen_observation_followup(
+        self,
+        result: AgentResult,
+        event: AgentEvent | None,
+        reminder_id: str | None,
+    ) -> bool:
+        screen_action = _first_screen_observation_request(result)
+        if screen_action is None:
+            return False
+        if event is None or event.type != "proactive_check":
+            self._consume_agent_result(_build_screen_observation_failed_result("缺少可关联的主动事件。"))
+            return True
+        if (
+            not self.screen_observation_enabled
+            or not self.model_vision_enabled
+            or not self.autonomous_screen_observation_enabled
+        ):
+            self._log_interaction_stage(
+                "event_screen_observation_disabled",
+                {
+                    "screen_observation_enabled": self.screen_observation_enabled,
+                    "model_vision_enabled": self.model_vision_enabled,
+                    "autonomous_screen_observation_enabled": self.autonomous_screen_observation_enabled,
+                },
+            )
+            self._consume_agent_result(_build_screen_observation_disabled_result())
+            return True
+        if isinstance(event.payload.get("screen_context"), dict):
+            self._consume_agent_result(_build_screen_observation_failed_result("本轮主动事件已经包含屏幕截图。"))
+            return True
+
+        reason = str(screen_action.payload.get("reason", "")).strip()
+        self.screen_observation_followup_in_progress = True
+        try:
+            observation = capture_screen_observation(self)
+        except RuntimeError as exc:
+            self.screen_observation_followup_in_progress = False
+            self._log_interaction_stage("event_screen_observation_failed", {"error": str(exc)})
+            debug_log("PetWindow", "主动事件屏幕观察失败", {"error": str(exc)})
+            self._consume_agent_result(_build_screen_observation_failed_result(str(exc)))
+            return True
+
+        payload = dict(event.payload)
+        payload["screen_context"] = {
+            "data_url": observation.data_url,
+            "width": observation.width,
+            "height": observation.height,
+            "captured_at": observation.captured_at,
+            "screen_name": observation.screen_name,
+        }
+        payload["screen_observation_requested_by_model"] = True
+        payload["screen_observation_reason"] = reason
+        self.pending_screen_observation_event = AgentEvent(type=event.type, payload=payload)
+        self.pending_screen_observation_event_reminder_id = reminder_id
+        self.screen_observation_followup_in_progress = False
+        self._record_history("system", SCREEN_OBSERVATION_HISTORY_MARKER)
+        debug_log(
+            "PetWindow",
+            "主动事件屏幕观察 follow-up 已排队",
+            {
+                "event_type": event.type,
+                "reason": reason,
+                "width": observation.width,
+                "height": observation.height,
+                "captured_at": observation.captured_at,
+                "screen_name": observation.screen_name,
+                "image": observation.data_url,
+            },
+        )
+        self._log_interaction_stage(
+            "event_screen_observation_captured",
             {
                 "width": observation.width,
                 "height": observation.height,
@@ -1126,6 +1229,7 @@ class PetWindow(QWidget):
                 "event": {"type": event.type, "payload": event.payload},
             },
         )
+        self.active_event = event
         self.active_event_type = event.type
         self.active_reminder_id = reminder_id
         self.active_reminder_text = str(event.payload.get("text", ""))
@@ -1151,7 +1255,11 @@ class PetWindow(QWidget):
             "event_result_received",
             {"event_type": self.active_event_type, "segments": len(result.reply.segments)},
         )
+        event = self.active_event
         reminder_id = self.active_reminder_id
+        if self._queue_event_screen_observation_followup(result, event, reminder_id):
+            self._clear_active_event()
+            return
         self._clear_active_event()
         self._consume_agent_result(result)
         if reminder_id is not None:
@@ -1197,6 +1305,7 @@ class PetWindow(QWidget):
             self._mark_reminder_completed(reminder_id)
 
     def _clear_active_event(self) -> None:
+        self.active_event = None
         self.active_event_type = ""
         self.active_reminder_id = None
         self.active_reminder_text = ""
@@ -1224,6 +1333,7 @@ class PetWindow(QWidget):
             "cleanup_worker_enter",
             {
                 "has_pending_screen_observation": self.pending_screen_observation_messages is not None,
+                "has_pending_screen_observation_event": self.pending_screen_observation_event is not None,
                 "screen_observation_followup_in_progress": self.screen_observation_followup_in_progress,
             },
         )
@@ -1245,6 +1355,17 @@ class PetWindow(QWidget):
                 {"message_count": len(request_messages)},
             )
             self._start_chat_worker(request_messages)
+            return
+        if self.pending_screen_observation_event is not None:
+            event = self.pending_screen_observation_event
+            reminder_id = self.pending_screen_observation_event_reminder_id
+            self.pending_screen_observation_event = None
+            self.pending_screen_observation_event_reminder_id = None
+            self._log_interaction_stage(
+                "event_screen_observation_worker_restart",
+                {"event_type": event.type},
+            )
+            self._run_event_worker(event, reminder_id)
             return
         self._set_busy(False)
         self._log_interaction_stage("ui_busy_disabled")
@@ -1322,6 +1443,7 @@ class PetWindow(QWidget):
             self.character_registry,
             self.character_profile,
             self.screen_observation_enabled,
+            self.autonomous_screen_observation_enabled,
             self.proactive_care_settings,
             self,
         )
@@ -1331,6 +1453,7 @@ class PetWindow(QWidget):
             or dialog.result_tts_settings is None
             or dialog.result_character_id is None
             or dialog.result_screen_observation_enabled is None
+            or dialog.result_autonomous_screen_observation_enabled is None
             or dialog.result_proactive_care_settings is None
         ):
             return
@@ -1352,7 +1475,12 @@ class PetWindow(QWidget):
             dialog.result_proactive_care_settings.save(self.env_path)
             save_env_values(
                 self.env_path,
-                {SCREEN_OBSERVATION_ENABLED_KEY: _format_bool(dialog.result_screen_observation_enabled)},
+                {
+                    SCREEN_OBSERVATION_ENABLED_KEY: _format_bool(dialog.result_screen_observation_enabled),
+                    AUTONOMOUS_SCREEN_OBSERVATION_ENABLED_KEY: _format_bool(
+                        dialog.result_autonomous_screen_observation_enabled
+                    ),
+                },
             )
         except OSError as exc:
             QMessageBox.critical(self, "保存失败", f"无法保存设置：{exc}")
@@ -1361,7 +1489,11 @@ class PetWindow(QWidget):
         self.api_client.update_settings(dialog.result_api_settings)
         previous_screen_observation_enabled = self.screen_observation_enabled
         self.screen_observation_enabled = dialog.result_screen_observation_enabled
+        self.autonomous_screen_observation_enabled = dialog.result_autonomous_screen_observation_enabled
         self.proactive_care_settings = dialog.result_proactive_care_settings
+        self.agent_runtime.set_autonomous_screen_observation_enabled(
+            self.autonomous_screen_observation_enabled
+        )
         if not self.screen_observation_enabled:
             self._set_model_vision_enabled(False)
         elif not previous_screen_observation_enabled:
@@ -1404,6 +1536,26 @@ class PetWindow(QWidget):
         enabled = enabled and self.screen_observation_enabled
         self.model_vision_enabled = enabled
         self.agent_runtime.set_model_vision_enabled(enabled)
+        if hasattr(self, "tray_icon"):
+            self.tray_icon.setContextMenu(self._build_menu())
+
+    @Slot(bool)
+    def _toggle_autonomous_screen_observation(self, checked: bool) -> None:
+        self.autonomous_screen_observation_enabled = checked and self.screen_observation_enabled
+        self.agent_runtime.set_autonomous_screen_observation_enabled(
+            self.autonomous_screen_observation_enabled
+        )
+        try:
+            save_env_values(
+                self.env_path,
+                {
+                    AUTONOMOUS_SCREEN_OBSERVATION_ENABLED_KEY: _format_bool(
+                        self.autonomous_screen_observation_enabled
+                    )
+                },
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", f"无法保存自主看屏幕设置：{exc}")
         if hasattr(self, "tray_icon"):
             self.tray_icon.setContextMenu(self._build_menu())
 
@@ -1756,6 +1908,18 @@ class PetWindow(QWidget):
         debug_log("PetWindow", "屏幕观察配置已加载", {"enabled": enabled})
         return enabled
 
+    def _load_autonomous_screen_observation_enabled(self) -> bool:
+        try:
+            values = load_env_file(self.env_path)
+        except OSError:
+            debug_log("PetWindow", "自主屏幕观察配置读取失败，使用默认值", {"default": False})
+            return False
+
+        enabled = _parse_bool(values.get(AUTONOMOUS_SCREEN_OBSERVATION_ENABLED_KEY), default=False)
+        enabled = enabled and self.screen_observation_enabled
+        debug_log("PetWindow", "自主屏幕观察配置已加载", {"enabled": enabled})
+        return enabled
+
     def _apply_character(self, profile: CharacterProfile) -> None:
         previous_character_id = self.character_profile.id
         self.character_profile = profile
@@ -1805,9 +1969,9 @@ def _build_screen_observation_disabled_result() -> AgentResult:
         reply=ChatReply(
             [
                 ChatSegment(
-                    text="画面を見る設定がオフになっているよ。設定で許可してから、もう一度頼んで。",
+                    text="画面を見る設定がオフになっているよ。設定で許可してから、もう一度試して。",
                     tone="提醒",
-                    translation="屏幕观察现在是关闭的。请在设置里允许按需屏幕观察后再试。",
+                    translation="屏幕观察或自主看屏幕现在是关闭的。请在设置里允许后再试。",
                     portrait="伸手命令",
                 )
             ]
@@ -1828,6 +1992,13 @@ def _build_screen_observation_failed_result(message: str) -> AgentResult:
             ]
         )
     )
+
+
+def _first_screen_observation_request(result: AgentResult) -> AgentAction | None:
+    for action in result.actions:
+        if action.type == SCREEN_OBSERVATION_REQUEST_ACTION:
+            return action
+    return None
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:

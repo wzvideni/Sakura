@@ -50,6 +50,7 @@ class AgentRuntime:
         self.tools = tools or ToolRegistry()
         self.memory = memory or MemoryStore()
         self.model_vision_enabled = True
+        self.autonomous_screen_observation_enabled = False
 
     def update_character(
         self,
@@ -66,9 +67,17 @@ class AgentRuntime:
         """允许模型在需要时请求一次当前屏幕截图。"""
         self.model_vision_enabled = enabled
 
+    def set_autonomous_screen_observation_enabled(self, enabled: bool) -> None:
+        """允许模型在对话或主动事件中自主决定是否观察屏幕。"""
+        self.autonomous_screen_observation_enabled = enabled
+
     def handle_user_message(self, messages: list[ChatMessage]) -> AgentResult:
         turn_started_at = time.perf_counter()
-        allow_screen_observation = self.model_vision_enabled and not messages_contain_image(messages)
+        allow_screen_observation = (
+            self.model_vision_enabled
+            and self.autonomous_screen_observation_enabled
+            and not messages_contain_image(messages)
+        )
         debug_log(
             "AgentRuntime",
             "开始处理用户消息",
@@ -76,6 +85,7 @@ class AgentRuntime:
                 "message_count": len(messages),
                 "allow_screen_observation": allow_screen_observation,
                 "model_vision_enabled": self.model_vision_enabled,
+                "autonomous_screen_observation_enabled": self.autonomous_screen_observation_enabled,
                 "messages": summarize_messages(messages),
             },
         )
@@ -412,9 +422,14 @@ class AgentRuntime:
             },
         )
         if event.type == "proactive_check":
+            allow_screen_observation = (
+                self.model_vision_enabled
+                and self.autonomous_screen_observation_enabled
+                and not messages_contain_image(event_messages)
+            )
             return self._run_tool_loop(
                 event_messages,
-                allow_screen_observation=False,
+                allow_screen_observation=allow_screen_observation,
                 turn_started_at=time.perf_counter(),
                 planning_extra_instructions=_build_proactive_tool_loop_rules(),
                 initial_actions=[event_action],
@@ -457,9 +472,9 @@ class AgentRuntime:
         memory_summary = self._memory_summary()
         current_time = datetime.now().astimezone().isoformat(timespec="seconds")
         screen_observation_instruction = (
-            "- observe_screen 只在确实需要当前屏幕内容时调用；如果文字信息已经足够回答，不要截图。"
+            "- observe_screen 是你的自主视觉感知工具；当你想确认主人当前窗口、屏幕内容、正在做什么、是否卡住，或需要具体画面话题时，可以主动调用。文字信息已经足够时不要截图。"
             if allow_screen_observation
-            else "- 当前没有可用的屏幕观察工具；不要请求截图，也不要臆造当前屏幕内容。"
+            else "- 当前没有可用的自主屏幕观察工具；不要请求截图，也不要臆造当前屏幕内容。"
         )
         return f"""
 {self.system_prompt.strip()}
@@ -994,6 +1009,7 @@ def _build_proactive_tool_loop_rules() -> str:
 - 如果看到视频、音乐、游戏、图片、角色或二次元女孩子，可以自然评价内容；若符合夜乃桜的人格，可以轻微吃醋、嘴硬、装作不在意或问“你喜欢这种类型吗”，但不要责备用户。
 - tone 和 portrait 要根据内容选择；主动搭话时不要固定使用“提醒”语气。
 - 你可以使用只读或低风险工具补充上下文，例如读取当前时间、搜索已确认记忆、读取受控浏览器当前内容或状态。
+- 如果可用工具里出现 observe_screen，你也可以因为想看看主人现在在做什么而主动观察屏幕；但同一事件已经有 screen_context.image_attached 时不要再截图。
 - 只有发现明确、有价值的后续线索时才继续下一步；不要为了显得主动而循环调用工具。
 - 不要主动执行会改变外部状态的工具，除非工具需要确认且你只是发起确认请求。
 - 如果事件已经附加 screen_context.image_attached，优先基于画面判断；不要再请求 observe_screen。
