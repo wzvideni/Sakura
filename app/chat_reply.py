@@ -13,6 +13,7 @@ class ChatSegment:
     text: str
     tone: str = DEFAULT_TONE
     translation: str = ""
+    portrait: str = ""
 
     def display_text(self, subtitle_language: str) -> str:
         """按字幕语言返回气泡显示文本；缺少译文时回退日文原文。"""
@@ -78,7 +79,7 @@ def _parse_segments(data: dict[str, Any]) -> list[ChatSegment]:
     if text:
         tone = data.get("tone")
         translation = _clean_first_text(data, "zh", "chinese", "translation")
-        return [_build_segment(text, tone, translation)]
+        return [_build_segment(text, tone, translation, data.get("portrait"))]
 
     return []
 
@@ -94,21 +95,27 @@ def _parse_segment(item: Any) -> ChatSegment | None:
     if not text:
         return None
     translation = _clean_first_text(item, "zh", "chinese", "translation")
-    return _build_segment(text, item.get("tone"), translation)
+    return _build_segment(text, item.get("tone"), translation, item.get("portrait"))
 
 
-def _build_segment(text: str, tone: Any, translation: str) -> ChatSegment:
+def _build_segment(text: str, tone: Any, translation: str, portrait: Any) -> ChatSegment:
     text = text.strip()
     translation = translation.strip()
     if _looks_chinese(text) and _looks_japanese(translation):
         text, translation = translation, text
-    return ChatSegment(text, _clean_tone(tone), translation)
+    return ChatSegment(text, _clean_tone(tone), translation, _clean_portrait(portrait))
 
 
 def _clean_tone(value: Any) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return DEFAULT_TONE
+
+
+def _clean_portrait(value: Any) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return ""
 
 
 def _clean_first_text(data: dict[str, Any], *keys: str) -> str:

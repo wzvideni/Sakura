@@ -41,11 +41,21 @@ class CharacterProfile:
     voice: CharacterVoice | None = None
     reply_tones: list[str] = field(default_factory=lambda: [*DEFAULT_TONES])
 
+    @property
+    def portrait_choices(self) -> list[str]:
+        return list(self.expression_portraits)
+
     def portrait_for_tone(self, tone: str | None) -> Path:
         tone_key = (tone or "").strip()
         if tone_key and tone_key in self.expression_portraits:
             return self.expression_portraits[tone_key]
         return self.default_portrait_path
+
+    def portrait_for_segment(self, portrait: str | None, tone: str | None = None) -> Path:
+        portrait_key = (portrait or "").strip()
+        if portrait_key and portrait_key in self.expression_portraits:
+            return self.expression_portraits[portrait_key]
+        return self.portrait_for_tone(tone)
 
 
 class CharacterRegistry:

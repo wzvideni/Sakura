@@ -4,29 +4,22 @@
   "initial_message": "……起動した。用事があるなら、呼んで。",
   "card": "card.md",
   "portrait": {
-    "default": "portraits/idle_soft_smile_A020.png",
+    "default": "portraits/A020.png",
     "expressions": {
-      "中性": "portraits/idle_soft_smile_A020.png",
-      "冷静": "portraits/idle_neutral_A010.png",
-      "困惑": "portraits/react_confused_o_A040.png",
-      "满意": "portraits/blink_smile_A050.png",
-      "甜蜜": "portraits/shy_blush_A061.png",
-      "害羞": "portraits/shy_blush_A061.png",
-      "惊讶": "portraits/react_surprised_A110.png",
-      "严肃": "portraits/talk_scold_A120.png",
-      "低落": "portraits/sad_downcast_A130.png",
-      "无语": "portraits/sleepy_blank_A140.png",
-      "无奈": "portraits/sigh_eyes_closed_A160.png",
-      "俏皮": "portraits/wink_playful_A180.png",
-      "不满": "portraits/pout_skeptical_A230.png",
-      "吃醋": "portraits/pout_skeptical_A230.png",
-      "自信": "portraits/confident_neutral_B010.png",
-      "提醒": "portraits/confident_callout_B120.png",
-      "调侃": "portraits/confident_teasing_B170.png",
-      "招呼": "portraits/gesture_wave_neutral_I010.png",
-      "引导": "portraits/gesture_invite_smile_I170.png",
-      "晚安": "portraits/gesture_goodbye_smile_I180.png",
-      "告别": "portraits/gesture_goodbye_smile_I180.png"
+      "站立待机": "portraits/A020.png",
+      "开心脸红": "portraits/A061.png",
+      "张嘴疑问": "portraits/A070.png",
+      "害羞脸红": "portraits/A081.png",
+      "难过沮丧": "portraits/A130.png",
+      "不满无语": "portraits/A140.png",
+      "两眼放光": "portraits/A150.png",
+      "高兴满足": "portraits/A170.png",
+      "吃醋不满": "portraits/A230.png",
+      "自信拍胸": "portraits/B180.png",
+      "自信撩发": "portraits/E050.png",
+      "侧身无语": "portraits/E140.png",
+      "伸手命令": "portraits/I010.png",
+      "伸手抚摸": "portraits/I180.png"
     }
   },
   "voice": {
@@ -39,16 +32,12 @@
   "reply": {
     "tones": [
       "中性",
-      "低落",
-      "严肃",
+      "不满",
+      "害羞",
       "请求",
       "困惑",
       "惊讶",
-      "俏皮",
-      "自信",
-      "晚安",
-      "害羞",
-      "吃醋"
+      "俏皮"
     ]
   }
 }

@@ -6,24 +6,31 @@ from app.portrait_utils import portrait_kind_key, should_crossfade_portrait
 
 
 def test_portrait_kind_key_uses_filename_suffix_group() -> None:
-    assert portrait_kind_key(Path("portraits/idle_soft_smile_A020.png")) == "A"
-    assert portrait_kind_key(Path("portraits/confident_callout_B120.png")) == "B"
-    assert portrait_kind_key(Path("portraits/gesture_invite_smile_I170.png")) == "I"
+    assert portrait_kind_key(Path("portraits/A020.png")) == "A"
+    assert portrait_kind_key(Path("portraits/B180.png")) == "B"
+    assert portrait_kind_key(Path("portraits/I010.png")) == "I"
 
 
-def test_same_portrait_kind_does_not_crossfade() -> None:
-    assert not should_crossfade_portrait(
-        Path("portraits/idle_soft_smile_A020.png"),
-        Path("portraits/react_surprised_A110.png"),
+def test_same_portrait_kind_crossfades_when_file_changes() -> None:
+    assert should_crossfade_portrait(
+        Path("portraits/A020.png"),
+        Path("portraits/A150.png"),
     )
-    assert not should_crossfade_portrait(
-        Path("portraits/gesture_wave_neutral_I010.png"),
-        Path("portraits/gesture_invite_smile_I170.png"),
+    assert should_crossfade_portrait(
+        Path("portraits/I010.png"),
+        Path("portraits/I180.png"),
     )
 
 
 def test_different_portrait_kind_crossfades() -> None:
     assert should_crossfade_portrait(
-        Path("portraits/idle_soft_smile_A020.png"),
-        Path("portraits/confident_neutral_B010.png"),
+        Path("portraits/A020.png"),
+        Path("portraits/B180.png"),
+    )
+
+
+def test_same_portrait_file_does_not_crossfade() -> None:
+    assert not should_crossfade_portrait(
+        Path("portraits/A020.png"),
+        Path("portraits/A020.png"),
     )

@@ -21,6 +21,13 @@ from PySide6.QtWidgets import (
 
 from app.api_client import ApiSettings, OpenAICompatibleClient
 from app.character_loader import CharacterProfile, CharacterRegistry
+from app.proactive_care import (
+    PROACTIVE_MAX_COOLDOWN_MINUTES,
+    PROACTIVE_MAX_CHECK_INTERVAL_MINUTES,
+    PROACTIVE_MIN_COOLDOWN_MINUTES,
+    PROACTIVE_MIN_CHECK_INTERVAL_MINUTES,
+    ProactiveCareSettings,
+)
 from app.tts import GPTSoVITSTTSSettings, TTSConfigError
 
 
@@ -54,6 +61,7 @@ class SettingsDialog(QDialog):
         character_registry: CharacterRegistry | None = None,
         current_character: CharacterProfile | None = None,
         screen_observation_enabled: bool = True,
+        proactive_care_settings: ProactiveCareSettings | None = None,
         parent=None,  # type: ignore[no-untyped-def]
     ) -> None:
         super().__init__(parent)
@@ -65,6 +73,7 @@ class SettingsDialog(QDialog):
         self.result_tts_settings: GPTSoVITSTTSSettings | None = None
         self.result_character_id: str | None = None
         self.result_screen_observation_enabled: bool | None = None
+        self.result_proactive_care_settings: ProactiveCareSettings | None = None
         self._api_test_thread: QThread | None = None
         self._api_test_worker: ApiConnectionTestWorker | None = None
 
@@ -76,7 +85,13 @@ class SettingsDialog(QDialog):
             tabs.addTab(self._build_character_tab(character_registry, current_character), "角色")
         tabs.addTab(self._build_api_tab(api_settings), "API")
         tabs.addTab(self._build_tts_tab(tts_settings), "TTS")
-        tabs.addTab(self._build_privacy_tab(screen_observation_enabled), "隐私")
+        tabs.addTab(
+            self._build_privacy_tab(
+                screen_observation_enabled,
+                proactive_care_settings or ProactiveCareSettings(),
+            ),
+            "隐私",
+        )
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
@@ -214,15 +229,56 @@ class SettingsDialog(QDialog):
         tab.setLayout(form_layout)
         return tab
 
-    def _build_privacy_tab(self, screen_observation_enabled: bool) -> QWidget:
+    def _build_privacy_tab(
+        self,
+        screen_observation_enabled: bool,
+        proactive_care_settings: ProactiveCareSettings,
+    ) -> QWidget:
         tab = QWidget(self)
         self.screen_observation_enabled_check = QCheckBox("允许按需屏幕观察", tab)
         self.screen_observation_enabled_check.setChecked(screen_observation_enabled)
+
+        self.proactive_care_enabled_check = QCheckBox("启用主动关怀", tab)
+        self.proactive_care_enabled_check.setChecked(proactive_care_settings.enabled)
+
+        self.proactive_screen_context_enabled_check = QCheckBox("允许模型主动获取屏幕信息", tab)
+        self.proactive_screen_context_enabled_check.setChecked(
+            proactive_care_settings.screen_context_enabled
+        )
+        self.proactive_screen_context_enabled_check.setEnabled(screen_observation_enabled)
+
+        self.proactive_check_interval_spin = QSpinBox(tab)
+        self.proactive_check_interval_spin.setRange(
+            PROACTIVE_MIN_CHECK_INTERVAL_MINUTES,
+            PROACTIVE_MAX_CHECK_INTERVAL_MINUTES,
+        )
+        self.proactive_check_interval_spin.setSuffix(" 分钟")
+        self.proactive_check_interval_spin.setValue(
+            proactive_care_settings.normalized().check_interval_minutes
+        )
+
+        self.proactive_cooldown_spin = QSpinBox(tab)
+        self.proactive_cooldown_spin.setRange(
+            PROACTIVE_MIN_COOLDOWN_MINUTES,
+            PROACTIVE_MAX_COOLDOWN_MINUTES,
+        )
+        self.proactive_cooldown_spin.setSuffix(" 分钟")
+        self.proactive_cooldown_spin.setValue(
+            proactive_care_settings.normalized().cooldown_minutes
+        )
+
+        self.screen_observation_enabled_check.toggled.connect(
+            self._sync_proactive_screen_context_enabled
+        )
 
         form_layout = QFormLayout()
         form_layout.setContentsMargins(16, 18, 16, 16)
         form_layout.setSpacing(12)
         form_layout.addRow("", self.screen_observation_enabled_check)
+        form_layout.addRow("", self.proactive_care_enabled_check)
+        form_layout.addRow("", self.proactive_screen_context_enabled_check)
+        form_layout.addRow("主动检查间隔", self.proactive_check_interval_spin)
+        form_layout.addRow("主动打扰冷却", self.proactive_cooldown_spin)
         tab.setLayout(form_layout)
         return tab
 
@@ -242,6 +298,15 @@ class SettingsDialog(QDialog):
         self.result_tts_settings = tts_settings
         self.result_character_id = self._selected_character_id()
         self.result_screen_observation_enabled = self.screen_observation_enabled_check.isChecked()
+        self.result_proactive_care_settings = ProactiveCareSettings(
+            enabled=self.proactive_care_enabled_check.isChecked(),
+            screen_context_enabled=(
+                self.screen_observation_enabled_check.isChecked()
+                and self.proactive_screen_context_enabled_check.isChecked()
+            ),
+            check_interval_minutes=self.proactive_check_interval_spin.value(),
+            cooldown_minutes=self.proactive_cooldown_spin.value(),
+        )
         super().accept()
 
     def reject(self) -> None:
@@ -287,6 +352,12 @@ class SettingsDialog(QDialog):
         self.api_test_button.setText("测试 API")
         self._api_test_thread = None
         self._api_test_worker = None
+
+    @Slot(bool)
+    def _sync_proactive_screen_context_enabled(self, screen_observation_enabled: bool) -> None:
+        self.proactive_screen_context_enabled_check.setEnabled(screen_observation_enabled)
+        if not screen_observation_enabled:
+            self.proactive_screen_context_enabled_check.setChecked(False)
 
     def _validated_api_settings(self) -> ApiSettings | None:
         base_url = self.base_url_edit.text().strip().rstrip("/")

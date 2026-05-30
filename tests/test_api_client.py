@@ -5,9 +5,11 @@ from typing import Any
 from app.api_client import (
     ApiSettings,
     OpenAICompatibleClient,
+    _build_segmented_reply_instruction,
     _build_chat_completion_payload,
     _filter_supported_chat_params,
 )
+from app.chat_reply import parse_chat_reply
 
 
 def test_chat_param_filter_keeps_supported_values() -> None:
@@ -70,3 +72,21 @@ def test_complete_raw_applies_param_filter(monkeypatch) -> None:  # type: ignore
     assert captured["temperature"] == 0.1
     assert captured["max_tokens"] == 8
     assert "unsupported_internal_flag" not in captured
+
+
+def test_segmented_reply_instruction_requests_portrait_field() -> None:
+    instruction = _build_segmented_reply_instruction(
+        ["中性", "提醒"],
+        ["站立待机", "伸手命令"],
+    )
+
+    assert '"portrait":"站立待机"' in instruction
+    assert "portrait 只能从这些类别中选择：站立待机、伸手命令" in instruction
+
+
+def test_parse_chat_reply_keeps_segment_portrait() -> None:
+    reply = parse_chat_reply(
+        '{"segments":[{"ja":"うん。","zh":"嗯。","tone":"中性","portrait":"站立待机"}]}'
+    )
+
+    assert reply.segments[0].portrait == "站立待机"

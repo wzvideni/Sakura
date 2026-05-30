@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from app.agent.actions import PendingToolAction
+from app.agent.actions import AgentEvent, PendingToolAction
 from app.agent.builtin_tools import create_builtin_tool_registry
 from app.agent.memory import MemoryStore
 from app.agent.mcp.bridge import MCPToolSpec
@@ -24,6 +24,12 @@ from app.agent.screen_tools import (
 from app.agent.tool_registry import Tool, ToolExecutionResult, ToolRegistry
 from app.api_client import ApiRequestError, is_vision_unsupported_error, messages_contain_image
 from app.context_trimming import MAX_MODEL_CONTEXT_MESSAGES, trim_messages_for_model
+from app.proactive_care import (
+    PROACTIVE_CHECK_INTERVAL_MINUTES_KEY,
+    PROACTIVE_COOLDOWN_MINUTES_KEY,
+    PROACTIVE_SCREEN_CONTEXT_ENABLED_KEY,
+    ProactiveCareSettings,
+)
 from app.screen_observation import (
     SCREEN_OBSERVATION_HISTORY_MARKER,
     ScreenObservation,
@@ -79,6 +85,107 @@ def test_due_reminders_and_mark_completed() -> None:
     store.mark_completed(due["id"])
 
     assert store.due_reminders(now) == []
+
+
+def test_proactive_care_settings_default_to_disabled() -> None:
+    settings = ProactiveCareSettings.load(_runtime_root_path("proactive_defaults") / ".env")
+
+    assert not settings.enabled
+    assert not settings.screen_context_enabled
+    assert settings.check_interval_minutes == 20
+    assert settings.cooldown_minutes == 10
+
+
+def test_proactive_care_settings_clamp_intervals() -> None:
+    env_path = _runtime_root_path("proactive_interval") / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(
+        "\n".join(
+            [
+                "PROACTIVE_CARE_ENABLED=true",
+                f"{PROACTIVE_SCREEN_CONTEXT_ENABLED_KEY}=true",
+                f"{PROACTIVE_CHECK_INTERVAL_MINUTES_KEY}=999",
+                f"{PROACTIVE_COOLDOWN_MINUTES_KEY}=999",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = ProactiveCareSettings.load(env_path)
+
+    assert settings.enabled
+    assert settings.screen_context_enabled
+    assert settings.check_interval_minutes == 120
+    assert settings.cooldown_minutes == 120
+
+
+def test_proactive_care_settings_min_intervals_are_one_minute() -> None:
+    env_path = _runtime_root_path("proactive_min_interval") / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(
+        "\n".join(
+            [
+                f"{PROACTIVE_CHECK_INTERVAL_MINUTES_KEY}=0",
+                f"{PROACTIVE_COOLDOWN_MINUTES_KEY}=0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = ProactiveCareSettings.load(env_path)
+
+    assert settings.check_interval_minutes == 1
+    assert settings.cooldown_minutes == 1
+
+
+def test_proactive_care_settings_invalid_cooldown_uses_default() -> None:
+    env_path = _runtime_root_path("proactive_invalid_cooldown") / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(
+        f"{PROACTIVE_COOLDOWN_MINUTES_KEY}=soon",
+        encoding="utf-8",
+    )
+
+    settings = ProactiveCareSettings.load(env_path)
+
+    assert settings.cooldown_minutes == 10
+
+
+def test_proactive_care_settings_save_writes_cooldown() -> None:
+    env_path = _runtime_root_path("proactive_save_cooldown") / ".env"
+
+    ProactiveCareSettings(
+        enabled=True,
+        screen_context_enabled=True,
+        check_interval_minutes=3,
+        cooldown_minutes=7,
+    ).save(env_path)
+
+    text = env_path.read_text(encoding="utf-8")
+    assert "PROACTIVE_CARE_ENABLED=true" in text
+    assert f"{PROACTIVE_CHECK_INTERVAL_MINUTES_KEY}=3" in text
+    assert f"{PROACTIVE_COOLDOWN_MINUTES_KEY}=7" in text
+
+
+def test_proactive_care_screen_context_requires_screen_observation_and_vision() -> None:
+    settings = ProactiveCareSettings(
+        enabled=True,
+        screen_context_enabled=True,
+        check_interval_minutes=20,
+    )
+
+    assert settings.allows_screen_context(
+        screen_observation_enabled=True,
+        model_vision_enabled=True,
+    )
+    assert not settings.allows_screen_context(
+        screen_observation_enabled=False,
+        model_vision_enabled=True,
+    )
+    assert not settings.allows_screen_context(
+        screen_observation_enabled=True,
+        model_vision_enabled=False,
+    )
 
 
 def test_memory_propose_update_only_creates_pending_record() -> None:
@@ -742,6 +849,111 @@ def test_vision_unsupported_error_gets_local_fallback_reply() -> None:
     result = runtime.handle_user_message([build_screen_observation_user_message("看看屏幕", observation)])
 
     assert "不支持图片输入" in result.reply.translation
+    assert not result.actions
+
+
+def test_proactive_check_event_generates_segmented_reply() -> None:
+    class ProactiveClient:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.messages: list[list[dict[str, object]]] = []
+
+        def chat(self, system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompts.append(system_prompt)
+            self.messages.append(messages)
+            from app.chat_reply import parse_chat_reply
+
+            return parse_chat_reply(
+                '{"segments":[{"ja":"少し休もう。","zh":"稍微休息一下吧。","tone":"提醒"}]}'
+            )
+
+    client = ProactiveClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+    )
+
+    result = runtime.handle_event(
+        AgentEvent(
+            type="proactive_check",
+            payload={
+                "idle_seconds": 1800,
+                "check_interval_minutes": 20,
+                "screen_context_allowed": False,
+            },
+        )
+    )
+
+    assert "低打扰主动关怀" in client.prompts[0]
+    assert result.reply.translation == "稍微休息一下吧。"
+    assert result.actions[0].payload["event_type"] == "proactive_check"
+
+
+def test_proactive_check_event_attaches_screen_context_image() -> None:
+    class ProactiveImageClient:
+        def __init__(self) -> None:
+            self.messages: list[list[dict[str, object]]] = []
+
+        def chat(self, _system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.messages.append(messages)
+            from app.chat_reply import parse_chat_reply
+
+            return parse_chat_reply(
+                '{"segments":[{"ja":"画面は見たよ。","zh":"我看过画面了。","tone":"提醒"}]}'
+            )
+
+    client = ProactiveImageClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+    )
+
+    runtime.handle_event(
+        AgentEvent(
+            type="proactive_check",
+            payload={
+                "screen_context": {
+                    "data_url": "data:image/jpeg;base64,abc123",
+                    "width": 800,
+                    "height": 600,
+                    "captured_at": "2026-05-30T12:00:00+08:00",
+                    "screen_name": "DISPLAY1",
+                }
+            },
+        )
+    )
+
+    content = client.messages[0][0]["content"]
+    assert isinstance(content, list)
+    assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,abc123"
+    assert "abc123" not in content[0]["text"]
+    assert "image_attached" in content[0]["text"]
+
+
+def test_proactive_check_vision_unsupported_uses_safe_fallback() -> None:
+    class ProactiveVisionUnsupportedClient:
+        def chat(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise ApiRequestError("model does not support image_url content")
+
+    runtime = AgentRuntime(
+        api_client=ProactiveVisionUnsupportedClient(),  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+    )
+
+    result = runtime.handle_event(
+        AgentEvent(
+            type="proactive_check",
+            payload={
+                "screen_context": {
+                    "data_url": "data:image/jpeg;base64,abc123",
+                    "width": 800,
+                    "height": 600,
+                }
+            },
+        )
+    )
+
+    assert "不会乱猜" in result.reply.translation
     assert not result.actions
 
 
