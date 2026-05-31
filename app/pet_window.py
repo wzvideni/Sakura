@@ -353,6 +353,7 @@ class PetWindow(QWidget):
         self.speech_text = ""
         self.speech_index = 0
         self.pending_reply_segments: list[ChatSegment] = []
+        self.queued_reply_segment_batches: list[list[ChatSegment]] = []
         self.current_segment: ChatSegment | None = None
         self.prepared_next_segment: ChatSegment | None = None
         self.prepared_next_tts: TTSPreparedAudio | None = None
@@ -1169,6 +1170,7 @@ class PetWindow(QWidget):
         self._log_interaction_stage("input_cleared")
         self.reply_sequence_id += 1
         self.pending_reply_segments = []
+        self.queued_reply_segment_batches = []
         self._reset_current_segment_progress()
         self.set_speech("......")
         self._log_interaction_stage("placeholder_reply_shown")
@@ -1503,6 +1505,7 @@ class PetWindow(QWidget):
         action = self.pending_tool_action
         self._log_interaction_stage("confirm_action", action.to_dict())
         self._set_pending_tool_action(None)
+        self._clear_queued_reply_segments_for_action_resolution()
         self._run_action_worker(confirmed_action=action)
 
     @Slot()
@@ -1514,6 +1517,7 @@ class PetWindow(QWidget):
         action = self.pending_tool_action
         self._log_interaction_stage("cancel_action", action.to_dict())
         self._set_pending_tool_action(None)
+        self._clear_queued_reply_segments_for_action_resolution()
         self._run_action_worker(cancelled_action=action)
 
     def _run_action_worker(
@@ -1589,6 +1593,33 @@ class PetWindow(QWidget):
         self.confirm_action_button.setVisible(has_action)
         self.cancel_action_button.setVisible(has_action)
         self._update_input_backdrop_geometry()
+        debug_log(
+            "PetWindow",
+            "待确认动作 UI 状态已更新",
+            {
+                "has_action": has_action,
+                "tool_name": action.tool_name if action is not None else "",
+                "confirm_visible": self.confirm_action_button.isVisible(),
+                "cancel_visible": self.cancel_action_button.isVisible(),
+                "confirm_enabled": self.confirm_action_button.isEnabled(),
+                "cancel_enabled": self.cancel_action_button.isEnabled(),
+            },
+        )
+
+    def _clear_queued_reply_segments_for_action_resolution(self) -> None:
+        if not self.queued_reply_segment_batches:
+            return
+        cleared_count = len(self.queued_reply_segment_batches)
+        self.queued_reply_segment_batches = []
+        self._log_interaction_stage(
+            "queued_reply_segments_cleared_for_action",
+            {"cleared_batch_count": cleared_count},
+        )
+        debug_log(
+            "PetWindow",
+            "已清理待确认动作相关的排队回复",
+            {"cleared_batch_count": cleared_count},
+        )
 
     @Slot()
     def _check_proactive_care(self) -> None:
@@ -2352,8 +2383,40 @@ class PetWindow(QWidget):
         )
 
     def _show_reply_segments(self, segments: list[ChatSegment]) -> None:
+        clean_segments = [segment for segment in segments if segment.text.strip()]
+        if self._is_reply_sequence_active():
+            if clean_segments:
+                self.queued_reply_segment_batches.append(clean_segments)
+                self._log_interaction_stage(
+                    "reply_segments_queued",
+                    {
+                        "queued_batch_count": len(self.queued_reply_segment_batches),
+                        "segment_count": len(clean_segments),
+                    },
+                )
+                debug_log(
+                    "PetWindow",
+                    "当前回复未播完，后续分段已排队",
+                    {
+                        "queued_batch_count": len(self.queued_reply_segment_batches),
+                        "segments": [
+                            {
+                                "text": segment.text,
+                                "tone": segment.tone,
+                                "portrait": segment.portrait,
+                                "translation": segment.translation,
+                            }
+                            for segment in clean_segments
+                        ],
+                    },
+                )
+            return
+
+        self._start_reply_segments_now(clean_segments)
+
+    def _start_reply_segments_now(self, segments: list[ChatSegment]) -> None:
         self.reply_sequence_id += 1
-        self.pending_reply_segments = [segment for segment in segments if segment.text.strip()]
+        self.pending_reply_segments = segments
         self._log_interaction_stage(
             "reply_segments_ready",
             {
@@ -2379,6 +2442,14 @@ class PetWindow(QWidget):
         )
         self._reset_current_segment_progress()
         self._show_next_reply_segment(self.reply_sequence_id)
+
+    def _is_reply_sequence_active(self) -> bool:
+        if self.pending_reply_segments or self.reply_advance_scheduled:
+            return True
+        return (
+            self.current_segment_sequence_id is not None
+            and (not self.current_segment_speech_done or not self.current_segment_tts_done)
+        )
 
     def _show_next_reply_segment(self, sequence_id: int) -> None:
         if sequence_id != self.reply_sequence_id or not self.pending_reply_segments:
@@ -2497,7 +2568,23 @@ class PetWindow(QWidget):
             and self.current_segment_tts_done
             and not self.pending_reply_segments
         ):
+            if self.queued_reply_segment_batches:
+                self._show_next_queued_reply_batch()
+                return
             self._end_interaction("reply_completed")
+
+    def _show_next_queued_reply_batch(self) -> None:
+        if not self.queued_reply_segment_batches:
+            return
+        next_segments = self.queued_reply_segment_batches.pop(0)
+        self._log_interaction_stage(
+            "queued_reply_segments_dequeued",
+            {
+                "remaining_batch_count": len(self.queued_reply_segment_batches),
+                "segment_count": len(next_segments),
+            },
+        )
+        self._start_reply_segments_now(next_segments)
 
     def _reset_current_segment_progress(self) -> None:
         self._discard_prepared_next_tts()
@@ -2626,6 +2713,7 @@ class PetWindow(QWidget):
             self.messages = []
             self.reply_sequence_id += 1
             self.pending_reply_segments = []
+            self.queued_reply_segment_batches = []
             self._reset_current_segment_progress()
             self.set_speech(profile.initial_message)
 

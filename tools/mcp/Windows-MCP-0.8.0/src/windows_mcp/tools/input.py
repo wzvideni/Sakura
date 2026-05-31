@@ -18,6 +18,15 @@ def _resolve_label(desktop, label):
         raise ValueError(f"Failed to find element with label {label}: {e}")
 
 
+def _cursor_suffix(desktop) -> str:
+    """Return actual cursor position after an input action for easier log diagnosis."""
+    try:
+        actual_x, actual_y = desktop.get_cursor_location()
+    except Exception:
+        return ""
+    return f" Cursor now at ({actual_x},{actual_y})."
+
+
 def register(mcp, *, get_desktop, get_analytics):
     @mcp.tool(
         name="Click",
@@ -53,7 +62,7 @@ def register(mcp, *, get_desktop, get_analytics):
         x, y = loc[0], loc[1]
         desktop.click(loc=loc, button=button, clicks=clicks)
         num_clicks = {0: "Hover", 1: "Single", 2: "Double"}
-        return f"{num_clicks.get(clicks)} {button} clicked at ({x},{y})."
+        return f"{num_clicks.get(clicks)} {button} clicked at ({x},{y}).{_cursor_suffix(desktop)}"
 
     @mcp.tool(
         name="Type",
@@ -161,10 +170,10 @@ def register(mcp, *, get_desktop, get_analytics):
         x, y = loc[0], loc[1]
         if drag:
             desktop.drag(loc)
-            return f"Dragged to ({x},{y})."
+            return f"Dragged to ({x},{y}).{_cursor_suffix(desktop)}"
         else:
             desktop.move(loc)
-            return f"Moved the mouse pointer to ({x},{y})."
+            return f"Moved the mouse pointer to ({x},{y}).{_cursor_suffix(desktop)}"
 
     @mcp.tool(
         name="Shortcut",

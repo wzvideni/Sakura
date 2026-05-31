@@ -194,19 +194,24 @@ def _format_call_tool_result(result: Any) -> dict[str, Any]:
     )
     content = getattr(result, "content", [])
     content_items = [_to_jsonable(item) for item in content] if isinstance(content, list) else []
+    image_data_urls = _extract_image_data_urls(content_items)
+    redacted_content_items = [_redact_content_image(item) for item in content_items]
     text_items = [
         str(item.get("text"))
-        for item in content_items
+        for item in redacted_content_items
         if isinstance(item, dict) and isinstance(item.get("text"), str)
     ]
     payload: dict[str, Any] = {
-        "content": content_items,
+        "content": redacted_content_items,
         "is_error": bool(getattr(result, "isError", False) or getattr(result, "is_error", False)),
     }
     if structured is not None:
         payload["structured_content"] = _to_jsonable(structured)
     if text_items:
         payload["text"] = "\n".join(text_items)
+    if image_data_urls:
+        payload["mcp_image_data_urls"] = image_data_urls
+        payload["screenshot_data_url"] = image_data_urls[0]
     return payload
 
 
@@ -225,3 +230,65 @@ def _to_jsonable(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _extract_image_data_urls(value: Any) -> list[str]:
+    images: list[str] = []
+    if isinstance(value, dict):
+        image_url = _image_item_to_data_url(value)
+        if image_url is not None:
+            images.append(image_url)
+        for item in value.values():
+            images.extend(_extract_image_data_urls(item))
+    elif isinstance(value, list):
+        for item in value:
+            images.extend(_extract_image_data_urls(item))
+    return _deduplicate_preserving_order(images)
+
+
+def _redact_content_image(value: Any) -> Any:
+    if isinstance(value, dict):
+        if _image_item_to_data_url(value) is not None:
+            return {
+                "type": value.get("type", "image"),
+                "image_attached": True,
+                "mime_type": _image_mime_type(value),
+            }
+        return {str(key): _redact_content_image(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_content_image(item) for item in value]
+    return value
+
+
+def _image_item_to_data_url(item: dict[str, Any]) -> str | None:
+    if str(item.get("type", "")).lower() != "image":
+        return None
+    data = item.get("data")
+    if not isinstance(data, str) or not data.strip():
+        return None
+    if data.startswith("data:image/"):
+        return data
+    mime_type = _image_mime_type(item)
+    if not mime_type.startswith("image/"):
+        return None
+    return f"data:{mime_type};base64,{data}"
+
+
+def _image_mime_type(item: dict[str, Any]) -> str:
+    mime_type = item.get("mimeType")
+    if not isinstance(mime_type, str) or not mime_type.strip():
+        mime_type = item.get("mime_type")
+    if not isinstance(mime_type, str) or not mime_type.strip():
+        mime_type = "image/png"
+    return mime_type.strip()
+
+
+def _deduplicate_preserving_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result

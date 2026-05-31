@@ -39,6 +39,31 @@ MAX_AGENT_STEPS_PER_TURN = 4
 MAX_TOOL_CALLS_PER_STEP = 3
 MAX_TOOL_CALLS_PER_TURN = 8
 MAX_TOOL_RESULT_CHARS = 6000
+MAX_PENDING_CONTEXT_MESSAGES = 12
+MAX_PENDING_CONTEXT_TEXT_CHARS = 4000
+WINDOWS_CLICK_TOOL_NAME = "windows__Click"
+WINDOWS_SCREENSHOT_TOOL_NAME = "windows__Screenshot"
+WINDOWS_SNAPSHOT_TOOL_NAME = "windows__Snapshot"
+WINDOWS_BROWSER_PAGE_CONFLICT_TOOL_NAMES = {
+    WINDOWS_CLICK_TOOL_NAME,
+    WINDOWS_SCREENSHOT_TOOL_NAME,
+    WINDOWS_SNAPSHOT_TOOL_NAME,
+    "windows__Type",
+    "windows__Scroll",
+    "windows__Move",
+}
+BROWSER_DOM_TOOL_NAMES = {
+    "browser__browser_navigate",
+    "browser__browser_snapshot",
+    "browser__browser_click",
+    "browser__browser_type",
+    "browser__browser_scroll",
+    "browser__browser_wait_for",
+}
+WEB_BACKGROUND_TOOL_NAMES = {
+    "web__web_search",
+    "web__fetch_url",
+}
 ProgressCallback = Callable[[AgentProgress], None]
 
 
@@ -130,6 +155,18 @@ class AgentRuntime:
         emitted_actions: list[AgentAction] = [*(initial_actions or [])]
         total_tool_calls = 0
         for step_index in range(MAX_AGENT_STEPS_PER_TURN):
+            browser_page_mode = _should_prefer_browser_page_tools(working_messages)
+            browser_page_guard_active = (
+                browser_page_mode
+                and _browser_dom_tools_available(self.tools)
+                and not _recent_browser_tool_failed(working_messages)
+                and not _latest_user_explicitly_requests_windows_control(working_messages)
+            )
+            visible_browser_guard_active = (
+                _latest_user_requests_visible_browser(working_messages)
+                and _browser_dom_tools_available(self.tools)
+                and not _recent_browser_tool_failed(working_messages)
+            )
             try:
                 planning_started_at = time.perf_counter()
                 model_content = self.api_client.complete_raw(
@@ -138,6 +175,8 @@ class AgentRuntime:
                         step_index=step_index,
                         remaining_steps=MAX_AGENT_STEPS_PER_TURN - step_index - 1,
                         extra_instructions=planning_extra_instructions,
+                        browser_page_mode=browser_page_guard_active,
+                        visible_browser_mode=visible_browser_guard_active,
                     ),
                     working_messages,
                     temperature=0.8,
@@ -221,13 +260,47 @@ class AgentRuntime:
             for call in tool_calls[:allowed_calls]:
                 total_tool_calls += 1
                 debug_log("AgentRuntime", "准备工具调用", {"step_index": step_index, **call})
+                if _should_block_windows_tool_for_browser_page(call, browser_page_guard_active):
+                    blocked_result = _build_browser_page_windows_tool_block_result(call)
+                    debug_log("AgentRuntime", "浏览器页面模式拦截 Windows 工具", blocked_result.to_dict())
+                    step_results.append(blocked_result)
+                    execution_results.append(blocked_result)
+                    emitted_actions.append(
+                        AgentAction(
+                            type="tool_call",
+                            payload=_redact_tool_result_for_model(blocked_result),
+                        )
+                    )
+                    continue
+                if _should_block_background_web_tool_for_visible_browser(call, visible_browser_guard_active):
+                    blocked_result = _build_visible_browser_web_tool_block_result(call)
+                    debug_log("AgentRuntime", "可见浏览器模式拦截后台网页工具", blocked_result.to_dict())
+                    step_results.append(blocked_result)
+                    execution_results.append(blocked_result)
+                    emitted_actions.append(
+                        AgentAction(
+                            type="tool_call",
+                            payload=_redact_tool_result_for_model(blocked_result),
+                        )
+                    )
+                    continue
                 prepared = self.tools.prepare_or_execute(
                     call["name"],
                     call["arguments"],
                     call.get("reason", ""),
                 )
                 if isinstance(prepared, PendingToolAction):
-                    debug_log("AgentRuntime", "工具调用等待用户确认", prepared.to_dict())
+                    prepared = prepared.with_continuation_messages(
+                        _build_pending_continuation_messages(working_messages, model_content)
+                    )
+                    debug_log(
+                        "AgentRuntime",
+                        "工具调用等待用户确认",
+                        {
+                            **prepared.to_dict(),
+                            "continuation_message_count": len(prepared.continuation_messages),
+                        },
+                    )
                     pending_actions.append(prepared)
                     continue
 
@@ -319,7 +392,7 @@ class AgentRuntime:
                         *[
                             AgentAction(
                                 type="pending_action",
-                                payload=action.to_dict(),
+                                payload=action.to_dict(include_context=True),
                             )
                             for action in pending_actions
                         ],
@@ -373,17 +446,53 @@ class AgentRuntime:
         action: PendingToolAction,
         progress_callback: ProgressCallback | None = None,
     ) -> AgentResult:
-        _ = progress_callback
+        turn_started_at = time.perf_counter()
         debug_log("AgentRuntime", "执行已确认动作", action.to_dict())
         result = self.tools.execute(action.tool_name, action.arguments)
+        results = [result]
+        verification_result = _verify_confirmed_windows_click(self.tools, action.tool_name)
+        if verification_result is not None:
+            results.append(verification_result)
+        emitted_actions = [
+            AgentAction(
+                type="tool_call",
+                payload=_redact_tool_result_for_model(item),
+            )
+            for item in results
+        ]
+        if action.continuation_messages:
+            working_messages = [
+                *action.continuation_messages,
+                _build_confirmed_action_result_message(action, results),
+            ]
+            allow_screen_observation = (
+                self.model_vision_enabled
+                and self.autonomous_screen_observation_enabled
+                and not messages_contain_image(working_messages)
+                and _should_offer_screen_observation(working_messages)
+            )
+            debug_log(
+                "AgentRuntime",
+                "已确认动作接回 Agent 循环",
+                {
+                    "tool_name": action.tool_name,
+                    "message_count": len(working_messages),
+                    "allow_screen_observation": allow_screen_observation,
+                },
+            )
+            return self._run_tool_loop(
+                working_messages,
+                allow_screen_observation=allow_screen_observation,
+                turn_started_at=turn_started_at,
+                planning_extra_instructions=_build_confirmed_action_continuation_rules(action),
+                initial_actions=emitted_actions,
+                progress_callback=progress_callback,
+            )
         try:
             reply = self.api_client.chat(
                 self._build_final_reply_prompt(),
                 [
-                    _build_tool_results_message(
-                        [result],
-                        include_images=self.model_vision_enabled,
-                    )
+                    _build_confirmed_action_result_message(action, results),
                 ],
                 self.reply_tones,
                 self.reply_portraits,
@@ -391,23 +500,18 @@ class AgentRuntime:
         except Exception as exc:
             print(f"[AgentRuntime] 确认动作总结失败，使用本地兜底回复：{exc}")
             debug_log("AgentRuntime", "确认动作总结失败，使用本地兜底回复", {"error": str(exc)})
-            reply = _build_fallback_tool_reply([result])
+            reply = _build_fallback_tool_reply(results)
         debug_log(
             "AgentRuntime",
             "已确认动作处理完成",
             {
-                "result": _redact_tool_result_for_model(result),
+                "results": [_redact_tool_result_for_model(item) for item in results],
                 "segments": len(reply.segments),
             },
         )
         return AgentResult(
             reply=reply,
-            actions=[
-                AgentAction(
-                    type="tool_call",
-                    payload=_redact_tool_result_for_model(result),
-                )
-            ],
+            actions=emitted_actions,
         )
 
     def handle_cancelled_action(self, action: PendingToolAction) -> AgentResult:
@@ -492,9 +596,15 @@ class AgentRuntime:
         step_index: int = 0,
         remaining_steps: int = MAX_AGENT_STEPS_PER_TURN - 1,
         extra_instructions: str = "",
+        browser_page_mode: bool = False,
+        visible_browser_mode: bool = False,
     ) -> str:
         allowed_capabilities = {SCREEN_OBSERVATION_CAPABILITY} if allow_screen_observation else set()
-        tools = self.tools.describe_tools(allowed_capabilities=allowed_capabilities)
+        tools = _filter_tools_for_browser_routing(
+            self.tools.describe_tools(allowed_capabilities=allowed_capabilities),
+            browser_page_mode=browser_page_mode,
+            visible_browser_mode=visible_browser_mode,
+        )
         tool_descriptions = json.dumps(
             tools,
             ensure_ascii=False,
@@ -506,11 +616,9 @@ class AgentRuntime:
         context_strategy = build_context_acquisition_strategy(
             allow_screen_observation=allow_screen_observation
         )
-        screen_observation_rule = (
-            "- 屏幕理解只通过 observe_screen 请求，由 Sakura 现有截图流程处理；不要请求 Windows-MCP 的 Screenshot 或 Snapshot。"
-            if allow_screen_observation
-            else "- 当前没有可用的屏幕观察工具；不要请求 Windows-MCP 的 Screenshot 或 Snapshot，也不要臆造当前屏幕。"
-        )
+        screen_observation_rule = _build_screen_and_desktop_routing_rule(allow_screen_observation)
+        browser_page_rule = _build_browser_page_mode_rule(browser_page_mode)
+        visible_browser_rule = _build_visible_browser_mode_rule(visible_browser_mode)
         return f"""
 {self.system_prompt.strip()}
 
@@ -544,7 +652,13 @@ class AgentRuntime:
 - requires_confirmation 为 true 的工具只会在用户确认后执行；你仍然可以发起 tool_calls，但必须说明原因。
 - 浏览器内部任务优先使用 browser__ 前缀的 Playwright MCP 工具；先用 browser__browser_snapshot 获取页面结构，再基于真实 target 调用点击、输入、表单、等待等工具。
 - 桌面窗口、应用切换、鼠标坐标、快捷键等浏览器外部任务才使用 windows__ 前缀的 Windows-MCP 工具；不要用 windows__Click/Move/Type 操作普通网页内部元素。
+- 对桌面窗口执行点击、移动、输入前，必须先用 windows__Snapshot 或 windows__Screenshot 获取真实窗口状态；优先使用 Snapshot 返回的 UI label/id 作为 Click 参数。
+- 如果 Windows MCP 截图结果显示 Available Displays 有多个显示器，或 Screenshot Original Size 明显大于单屏，禁止直接基于全虚拟桌面截图里的小图标、缩小坐标或标号执行 Click/Move/Type；必须先再次调用 windows__Snapshot / windows__Screenshot 并传入 display=[0]、display=[1] 等限定到目标所在显示器后再选择 label/id。桌面左上角、回收站等桌面图标默认先检查 display=[0]，看不到再检查其他 display。
+- 如果只能基于截图坐标点击，必须结合工具结果里的 Screenshot Original Size、Screenshot Region、显示尺寸和缩放比例，把图像坐标换算为真实虚拟桌面坐标；不要使用 Sakura 内置视觉观察的缩放图片坐标。
+- 推理出桌面点击目标后，发起 windows__Click 并等待用户确认；确认执行后 Runtime 会自动用 Windows MCP 截图验证结果。
 {screen_observation_rule}
+{browser_page_rule}
+{visible_browser_rule}
 - 如果 browser__ 工具不可用，读取 Sakura 受控浏览器内容时再使用 browser_get_content；需要打开受控浏览器网页时使用 browser_open_url。
 - 需要网页交互时，只能基于当前页面真实内容选择工具，不要臆造 selector、target 或页面内容。
 {extra_instructions.strip()}
@@ -718,6 +832,260 @@ def _is_screen_observation_request(result: ToolExecutionResult) -> bool:
     return result.content.get("action") == SCREEN_OBSERVATION_REQUEST_ACTION
 
 
+def _verify_confirmed_windows_click(
+    tools: ToolRegistry,
+    tool_name: str,
+) -> ToolExecutionResult | None:
+    """Windows 桌面点击后追加一次只读截图验证。"""
+    if tool_name != WINDOWS_CLICK_TOOL_NAME:
+        return None
+
+    screenshot_tool = tools.get(WINDOWS_SCREENSHOT_TOOL_NAME)
+    snapshot_tool = tools.get(WINDOWS_SNAPSHOT_TOOL_NAME)
+
+    screenshot_result: ToolExecutionResult | None = None
+    if screenshot_tool is not None:
+        screenshot_result = tools.execute(WINDOWS_SCREENSHOT_TOOL_NAME, {})
+        if screenshot_result.success or snapshot_tool is None:
+            return screenshot_result
+
+    if snapshot_tool is not None:
+        snapshot_result = tools.execute(
+            WINDOWS_SNAPSHOT_TOOL_NAME,
+            {
+                "use_vision": True,
+                "use_ui_tree": False,
+            },
+        )
+        if snapshot_result.success or screenshot_result is None:
+            return snapshot_result
+        return ToolExecutionResult(
+            tool_name="windows__verification",
+            success=False,
+            content="",
+            error=(
+                f"Screenshot 验证失败：{screenshot_result.error or '未知错误'}；"
+                f"Snapshot 验证失败：{snapshot_result.error or '未知错误'}"
+            ),
+        )
+
+    return ToolExecutionResult(
+        tool_name="windows__verification",
+        success=False,
+        content="",
+        error="没有可用的 windows__Screenshot 或 windows__Snapshot，无法自动验证点击结果。",
+    )
+
+
+def _filter_tools_for_browser_routing(
+    tools: list[dict[str, Any]],
+    *,
+    browser_page_mode: bool,
+    visible_browser_mode: bool,
+) -> list[dict[str, Any]]:
+    """按浏览器路由模式隐藏容易诱导模型走错路径的工具。"""
+    if not browser_page_mode and not visible_browser_mode:
+        return tools
+    hidden_names: set[str] = set()
+    if browser_page_mode:
+        hidden_names.update(WINDOWS_BROWSER_PAGE_CONFLICT_TOOL_NAMES)
+    if visible_browser_mode:
+        hidden_names.update(WEB_BACKGROUND_TOOL_NAMES)
+    return [tool for tool in tools if str(tool.get("name", "")) not in hidden_names]
+
+
+def _should_block_windows_tool_for_browser_page(
+    call: dict[str, Any],
+    browser_page_mode: bool,
+) -> bool:
+    if not browser_page_mode:
+        return False
+    return str(call.get("name", "")) in WINDOWS_BROWSER_PAGE_CONFLICT_TOOL_NAMES
+
+
+def _should_block_background_web_tool_for_visible_browser(
+    call: dict[str, Any],
+    visible_browser_mode: bool,
+) -> bool:
+    if not visible_browser_mode:
+        return False
+    return str(call.get("name", "")) in WEB_BACKGROUND_TOOL_NAMES
+
+
+def _build_browser_page_windows_tool_block_result(call: dict[str, Any]) -> ToolExecutionResult:
+    tool_name = str(call.get("name", "")).strip() or "unknown"
+    return ToolExecutionResult(
+        tool_name="runtime",
+        success=False,
+        content={
+            "blocked_tool": tool_name,
+            "reason": "当前上下文是浏览器页面内部操作，已阻止 Windows-MCP 坐标/截图工具抢路由。",
+            "guidance": (
+                "请先使用 browser__browser_snapshot 获取页面结构，"
+                "再基于真实 target 调用 browser__browser_click、"
+                "browser__browser_type、browser__browser_wait_for 等 Playwright/browser MCP 工具。"
+            ),
+        },
+        error=f"已阻止 {tool_name}：浏览器页面内部操作应优先使用 browser__ 工具。",
+    )
+
+
+def _build_visible_browser_web_tool_block_result(call: dict[str, Any]) -> ToolExecutionResult:
+    tool_name = str(call.get("name", "")).strip() or "unknown"
+    return ToolExecutionResult(
+        tool_name="runtime",
+        success=False,
+        content={
+            "blocked_tool": tool_name,
+            "reason": "用户明确要求打开浏览器或看到搜索过程，已阻止后台网页搜索/抓取工具。",
+            "guidance": (
+                "请使用 browser__browser_navigate 打开搜索引擎或目标网址，"
+                "再用 browser__browser_snapshot 获取页面结构，并用 browser__browser_type、"
+                "browser__browser_click、browser__browser_wait_for 等工具完成可见浏览器流程。"
+            ),
+        },
+        error=f"已阻止 {tool_name}：显式浏览器任务应使用 browser__ 工具，不要只做后台搜索。",
+    )
+
+
+def _browser_dom_tools_available(tools: ToolRegistry) -> bool:
+    return any(tools.get(name) is not None for name in BROWSER_DOM_TOOL_NAMES)
+
+
+def _should_prefer_browser_page_tools(messages: list[ChatMessage]) -> bool:
+    text = _messages_text_for_tool_routing(messages).lower()
+    if "browser__" in text:
+        return True
+
+    latest_text = (_latest_user_text(messages) or "").lower()
+    if not latest_text:
+        return False
+    browser_keywords = (
+        "浏览器",
+        "网页",
+        "页面",
+        "链接",
+        "搜索结果",
+        "搜索框",
+        "输入框",
+        "点进",
+        "点开",
+        "打开网页",
+        "标签页",
+        "网址",
+        "url",
+        "http://",
+        "https://",
+        "百科",
+        "必应",
+        "bing",
+        "百度",
+        "google",
+    )
+    return any(keyword in latest_text for keyword in browser_keywords)
+
+
+def _latest_user_requests_visible_browser(messages: list[ChatMessage]) -> bool:
+    text = (_latest_user_text(messages) or "").lower()
+    if not text:
+        return False
+    visible_browser_keywords = (
+        "打开浏览器",
+        "用浏览器",
+        "浏览器搜索",
+        "在浏览器",
+        "打开网页",
+        "打开页面",
+        "看搜索过程",
+        "看到搜索过程",
+        "让我看到",
+        "给我看搜索",
+        "搜给我看",
+        "可见浏览器",
+        "前台浏览器",
+    )
+    return any(keyword in text for keyword in visible_browser_keywords)
+
+
+def _recent_browser_tool_failed(messages: list[ChatMessage]) -> bool:
+    recent_text = _messages_text_for_tool_routing(messages[-4:]).lower()
+    return (
+        "browser__" in recent_text
+        and (
+            '"success": false' in recent_text
+            or '"success":false' in recent_text
+            or "'success': false" in recent_text
+            or "'success':false" in recent_text
+            or '"is_error": true' in recent_text
+            or '"is_error":true' in recent_text
+            or "'is_error': true" in recent_text
+            or "'is_error':true" in recent_text
+            or "工具执行异常" in recent_text
+            or "工具执行失败" in recent_text
+        )
+    )
+
+
+def _latest_user_explicitly_requests_windows_control(messages: list[ChatMessage]) -> bool:
+    text = (_latest_user_text(messages) or "").lower()
+    if not text:
+        return False
+    explicit_keywords = (
+        "真实鼠标",
+        "物理鼠标",
+        "鼠标",
+        "坐标",
+        "windows",
+        "桌面",
+        "窗口",
+        "浏览器窗口",
+        "地址栏",
+        "任务栏",
+        "快捷键",
+        "键盘",
+        "系统界面",
+    )
+    return any(keyword in text for keyword in explicit_keywords)
+
+
+def _messages_text_for_tool_routing(messages: list[ChatMessage]) -> str:
+    return "\n".join(_compact_pending_context_content(message.get("content")) for message in messages)
+
+
+def _build_browser_page_mode_rule(browser_page_mode: bool) -> str:
+    if not browser_page_mode:
+        return ""
+    return (
+        "- 当前上下文已识别为浏览器页面内部操作模式：Windows-MCP 坐标、截图、输入、滚动工具已从可用工具中隐藏。"
+        "继续点击链接、输入搜索词、滚动页面或等待页面变化时，必须使用 browser__ 前缀的 Playwright MCP 工具。"
+    )
+
+
+def _build_visible_browser_mode_rule(visible_browser_mode: bool) -> str:
+    if not visible_browser_mode:
+        return ""
+    return (
+        "- 用户明确要求打开浏览器或看到搜索过程：后台 web__ 搜索/抓取工具已从可用工具中隐藏。"
+        "必须使用 browser__browser_navigate/type/click/snapshot/wait_for 等工具完成可见浏览器搜索流程。"
+    )
+
+
+def _build_screen_and_desktop_routing_rule(allow_screen_observation: bool) -> str:
+    if allow_screen_observation:
+        return "\n".join(
+            [
+                "- 当用户询问当前屏幕内容、可见文字、报错含义、界面状态或“这个是什么意思”时，优先调用 observe_screen；这是 Sakura 内置视觉观察，只用于理解画面和解释，不用于鼠标坐标。",
+                "- 当用户要求你点击、移动鼠标、输入、切换窗口或操作桌面应用时，不要用 observe_screen 推理坐标；改用 Windows MCP 的 windows__Snapshot / windows__Screenshot 作为操作前观察。",
+            ]
+        )
+    return "\n".join(
+        [
+            "- 当前没有可用的 Sakura 内置屏幕理解工具；不要臆造当前屏幕内容。",
+            "- 如果用户要求桌面点击、移动鼠标、输入或窗口操作，并且 Windows MCP 截图工具可用，先用 windows__Snapshot / windows__Screenshot 获取真实桌面状态。",
+        ]
+    )
+
+
 def _should_offer_screen_observation(messages: list[ChatMessage]) -> bool:
     """只在当前轮仍有可关联用户消息时开放自主屏幕观察。"""
     text = _latest_user_text(messages)
@@ -747,6 +1115,68 @@ def _latest_user_text(messages: list[ChatMessage]) -> str | None:
     return None
 
 
+def _build_pending_continuation_messages(
+    working_messages: list[ChatMessage],
+    model_content: str,
+) -> list[ChatMessage]:
+    """为待确认动作保存轻量上下文，避免确认执行后丢失原任务。"""
+    messages = [
+        *_compact_messages_for_pending_context(working_messages),
+        {
+            "role": "assistant",
+            "content": _truncate_pending_context_text(model_content),
+        },
+    ]
+    return messages[-MAX_PENDING_CONTEXT_MESSAGES:]
+
+
+def _compact_messages_for_pending_context(messages: list[ChatMessage]) -> list[ChatMessage]:
+    return [_compact_message_for_pending_context(message) for message in messages]
+
+
+def _compact_message_for_pending_context(message: ChatMessage) -> ChatMessage:
+    role = message.get("role")
+    return {
+        "role": role if isinstance(role, str) and role else "user",
+        "content": _compact_pending_context_content(message.get("content")),
+    }
+
+
+def _compact_pending_context_content(content: Any) -> str:
+    if isinstance(content, str):
+        return _truncate_pending_context_text(content)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                text = part.get("text", "")
+                parts.append(_truncate_pending_context_text(str(text)))
+            elif part.get("type") == "image_url":
+                parts.append("[图片内容已省略，确认后继续时请根据文本工具结果判断。]")
+        return "\n".join(part for part in parts if part)
+    if content is None:
+        return ""
+    try:
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(content)
+    return _truncate_pending_context_text(text)
+
+
+def _truncate_pending_context_text(text: str) -> str:
+    if len(text) <= MAX_PENDING_CONTEXT_TEXT_CHARS:
+        return text
+    head_chars = max(1, MAX_PENDING_CONTEXT_TEXT_CHARS // 2)
+    tail_chars = MAX_PENDING_CONTEXT_TEXT_CHARS - head_chars
+    return (
+        text[:head_chars]
+        + f"\n...[已省略 {len(text) - head_chars - tail_chars} 字确认上下文]...\n"
+        + text[-tail_chars:]
+    )
+
+
 def _build_tool_results_message(
     results: list[ToolExecutionResult],
     include_images: bool = False,
@@ -770,6 +1200,37 @@ def _build_tool_results_message(
     return {"role": "user", "content": content}
 
 
+def _build_confirmed_action_result_message(
+    action: PendingToolAction,
+    results: list[ToolExecutionResult],
+) -> ChatMessage:
+    text = (
+        "用户刚刚确认并执行了一个待确认工具动作。"
+        "这不是新的用户任务，请结合此前上下文继续完成原请求；"
+        "如果该动作只是中间步骤，不要把当前窗口状态误当成新问题。\n"
+        f"已确认动作：{action.tool_name}\n"
+        f"动作参数：{json.dumps(action.arguments, ensure_ascii=False, default=str)}\n"
+        f"动作原因：{action.reason or '未提供'}\n\n"
+        + _format_tool_results_for_model(results)
+    )
+    return {"role": "user", "content": text}
+
+
+def _build_confirmed_action_continuation_rules(action: PendingToolAction) -> str:
+    rules = [
+        "确认动作续接规则：",
+        f"- 用户刚刚确认执行了 {action.tool_name}，这只是前一轮任务的一个中间步骤。",
+        "- 不要把工具执行后的界面当成用户发起的新闲聊问题；必须回到前文的原始用户目标继续推进。",
+        "- 如果动作成功但任务尚未完成，请继续请求下一步必要工具；如果已经完成，再给最终回复。",
+        "- 如果刚打开的是 Windows“运行”窗口，且前文已经计划通过命令完成任务，应继续输入/提交对应命令，而不是询问用户想使用什么工具。",
+    ]
+    if action.tool_name.startswith("browser__"):
+        rules.append(
+            "- 刚确认执行的是 browser__ 工具，后续网页内点击、输入、滚动、等待页面变化仍应继续使用 browser__ 工具；不要因为页面可见就切换到 windows__ 坐标点击。"
+        )
+    return "\n".join(rules)
+
+
 def _format_tool_results_for_model(results: list[ToolExecutionResult]) -> str:
     return (
         "工具执行结果如下，请据此给用户最终回复。"
@@ -791,9 +1252,10 @@ def _redact_tool_result_for_model(result: ToolExecutionResult) -> dict[str, Any]
     if not isinstance(content, dict):
         return data
 
-    redacted = dict(content)
-    if redacted.pop("screenshot_data_url", None):
+    redacted, image_count = _redact_tool_images_from_content(content)
+    if image_count:
         redacted["screenshot_attached"] = True
+        redacted["screenshot_image_count"] = image_count
     data["content"] = _truncate_value_for_model(redacted, MAX_TOOL_RESULT_CHARS)
     return data
 
@@ -832,10 +1294,106 @@ def _extract_tool_result_images(results: list[ToolExecutionResult]) -> list[str]
     for result in results:
         if not isinstance(result.content, dict):
             continue
-        image_url = result.content.get("screenshot_data_url")
-        if isinstance(image_url, str) and image_url.startswith("data:image/"):
-            images.append(image_url)
+        images.extend(_extract_image_data_urls_from_value(result.content))
     return images[:1]
+
+
+def _redact_tool_images_from_content(content: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    image_count = 0
+
+    def redact(value: Any) -> Any:
+        nonlocal image_count
+        if isinstance(value, dict):
+            if _mcp_image_item_to_data_url(value) is not None:
+                image_count += 1
+                return {
+                    "type": value.get("type", "image"),
+                    "image_attached": True,
+                    "mime_type": _mcp_image_mime_type(value),
+                }
+            redacted_dict: dict[str, Any] = {}
+            for key, item in value.items():
+                if key in {"screenshot_data_url", "mcp_image_data_urls"}:
+                    if isinstance(item, str) and item.startswith("data:image/"):
+                        image_count += 1
+                    elif isinstance(item, list):
+                        image_count += len(
+                            [
+                                image_url
+                                for image_url in item
+                                if isinstance(image_url, str) and image_url.startswith("data:image/")
+                            ]
+                        )
+                    continue
+                redacted_dict[str(key)] = redact(item)
+            return redacted_dict
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        return value
+
+    redacted = redact(content)
+    return redacted if isinstance(redacted, dict) else {}, image_count
+
+
+def _extract_image_data_urls_from_value(value: Any) -> list[str]:
+    images: list[str] = []
+    if isinstance(value, dict):
+        screenshot = value.get("screenshot_data_url")
+        if isinstance(screenshot, str) and screenshot.startswith("data:image/"):
+            images.append(screenshot)
+
+        mcp_images = value.get("mcp_image_data_urls")
+        if isinstance(mcp_images, list):
+            images.extend(
+                image_url
+                for image_url in mcp_images
+                if isinstance(image_url, str) and image_url.startswith("data:image/")
+            )
+
+        data_url = _mcp_image_item_to_data_url(value)
+        if data_url is not None:
+            images.append(data_url)
+
+        for item in value.values():
+            images.extend(_extract_image_data_urls_from_value(item))
+    elif isinstance(value, list):
+        for item in value:
+            images.extend(_extract_image_data_urls_from_value(item))
+    return _deduplicate_preserving_order(images)
+
+
+def _mcp_image_item_to_data_url(item: dict[str, Any]) -> str | None:
+    if str(item.get("type", "")).lower() != "image":
+        return None
+    data = item.get("data")
+    if not isinstance(data, str) or not data.strip():
+        return None
+    if data.startswith("data:image/"):
+        return data
+    mime_type = _mcp_image_mime_type(item)
+    if not mime_type.startswith("image/"):
+        return None
+    return f"data:{mime_type};base64,{data}"
+
+
+def _mcp_image_mime_type(item: dict[str, Any]) -> str:
+    mime_type = item.get("mimeType")
+    if not isinstance(mime_type, str) or not mime_type.strip():
+        mime_type = item.get("mime_type")
+    if not isinstance(mime_type, str) or not mime_type.strip():
+        mime_type = "image/png"
+    return mime_type.strip()
+
+
+def _deduplicate_preserving_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def _build_pending_action_reply(actions: list[PendingToolAction]) -> ChatReply:

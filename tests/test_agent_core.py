@@ -968,6 +968,342 @@ def test_agent_runtime_emits_progress_before_pending_confirmation() -> None:
     assert any(action.type == "pending_action" for action in result.actions)
 
 
+def test_browser_page_mode_hides_windows_mouse_tools_from_planner() -> None:
+    class PromptCaptureClient:
+        def __init__(self) -> None:
+            self.prompt = ""
+
+        def complete_raw(self, system_prompt, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompt = system_prompt
+            return (
+                '{"reply":{"segments":[{"ja":"確認できたよ。","zh":"确认好了。","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+    registry = ToolRegistry(
+        [
+            Tool(name="browser__browser_snapshot", description="浏览器页面快照", handler=lambda _arguments: {}),
+            Tool(name="browser__browser_click", description="浏览器点击", handler=lambda _arguments: {}),
+            Tool(name="browser__browser_type", description="浏览器输入", handler=lambda _arguments: {}),
+            Tool(name="windows__Snapshot", description="桌面快照", handler=lambda _arguments: {}),
+            Tool(name="windows__Click", description="桌面点击", handler=lambda _arguments: {}),
+        ]
+    )
+    client = PromptCaptureClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    runtime.handle_user_message(
+        [
+            {"role": "user", "content": "打开浏览器搜一下二阶堂真红"},
+            {
+                "role": "user",
+                "content": '工具执行结果如下：[{"tool_name":"browser__browser_type","success":true}]',
+            },
+            {"role": "user", "content": "帮我点进百科看看"},
+        ]
+    )
+
+    assert '"name": "browser__browser_snapshot"' in client.prompt
+    assert '"name": "browser__browser_click"' in client.prompt
+    assert '"name": "browser__browser_type"' in client.prompt
+    assert '"name": "windows__Snapshot"' not in client.prompt
+    assert '"name": "windows__Click"' not in client.prompt
+
+
+def test_visible_browser_request_hides_background_web_tools_from_planner() -> None:
+    class PromptCaptureClient:
+        def __init__(self) -> None:
+            self.prompt = ""
+
+        def complete_raw(self, system_prompt, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompt = system_prompt
+            return (
+                '{"reply":{"segments":[{"ja":"開くね。","zh":"我打开。","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+    registry = ToolRegistry(
+        [
+            Tool(name="browser__browser_navigate", description="打开浏览器页面", handler=lambda _arguments: {}),
+            Tool(name="browser__browser_snapshot", description="浏览器页面快照", handler=lambda _arguments: {}),
+            Tool(name="browser__browser_type", description="浏览器输入", handler=lambda _arguments: {}),
+            Tool(name="web__web_search", description="后台搜索", handler=lambda _arguments: {}),
+            Tool(name="web__fetch_url", description="后台读取网页", handler=lambda _arguments: {}),
+        ]
+    )
+    client = PromptCaptureClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    runtime.handle_user_message([{"role": "user", "content": "打开浏览器搜索一下二阶堂真红,看看百科怎么描述的"}])
+
+    assert '"name": "browser__browser_navigate"' in client.prompt
+    assert '"name": "browser__browser_snapshot"' in client.prompt
+    assert '"name": "browser__browser_type"' in client.prompt
+    assert '"name": "web__web_search"' not in client.prompt
+    assert '"name": "web__fetch_url"' not in client.prompt
+
+
+def test_visible_browser_request_blocks_background_search_and_continues_planning() -> None:
+    class MisroutedSearchClient:
+        def __init__(self) -> None:
+            self.raw_calls = 0
+            self.messages: list[list[dict[str, object]]] = []
+
+        def complete_raw(self, _system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.raw_calls += 1
+            self.messages.append(messages)
+            if self.raw_calls == 1:
+                return (
+                    '{"reply":{"segments":[{"ja":"検索するね。","zh":"我来搜索。","tone":"中性"}]},'
+                    '"tool_calls":[{"name":"web__web_search","arguments":{"query":"二阶堂真红 百科"},"reason":"搜索百科"}]}'
+                )
+            assert "用户明确要求打开浏览器" in str(messages)
+            assert "browser__browser_navigate" in str(messages)
+            return (
+                '{"reply":{"segments":[{"ja":"ブラウザで開くね。","zh":"我改用浏览器打开。","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+    called = {"web_search": False}
+
+    def web_search(_arguments):  # type: ignore[no-untyped-def]
+        called["web_search"] = True
+        return {"results": []}
+
+    registry = ToolRegistry(
+        [
+            Tool(name="browser__browser_navigate", description="打开浏览器页面", handler=lambda _arguments: {}),
+            Tool(name="browser__browser_snapshot", description="浏览器页面快照", handler=lambda _arguments: {}),
+            Tool(name="browser__browser_type", description="浏览器输入", handler=lambda _arguments: {}),
+            Tool(name="web__web_search", description="后台搜索", handler=web_search),
+        ]
+    )
+    client = MisroutedSearchClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    result = runtime.handle_user_message(
+        [{"role": "user", "content": "打开浏览器搜索一下二阶堂真红,看看百科怎么描述的"}]
+    )
+
+    assert result.reply.translation == "我改用浏览器打开。"
+    assert [action.payload["tool_name"] for action in result.actions] == ["runtime"]
+    assert not called["web_search"]
+    assert client.raw_calls == 2
+
+
+def test_plain_lookup_still_exposes_background_web_tools() -> None:
+    class PromptCaptureClient:
+        def __init__(self) -> None:
+            self.prompt = ""
+
+        def complete_raw(self, system_prompt, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompt = system_prompt
+            return (
+                '{"reply":{"segments":[{"ja":"調べるね。","zh":"我查一下。","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+    registry = ToolRegistry(
+        [
+            Tool(name="browser__browser_navigate", description="打开浏览器页面", handler=lambda _arguments: {}),
+            Tool(name="web__web_search", description="后台搜索", handler=lambda _arguments: {}),
+            Tool(name="web__fetch_url", description="后台读取网页", handler=lambda _arguments: {}),
+        ]
+    )
+    client = PromptCaptureClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    runtime.handle_user_message([{"role": "user", "content": "查一下二阶堂真红百科怎么描述的"}])
+
+    assert '"name": "web__web_search"' in client.prompt
+    assert '"name": "web__fetch_url"' in client.prompt
+
+
+def test_browser_page_mode_blocks_windows_click_and_continues_planning() -> None:
+    class MisroutedClickClient:
+        def __init__(self) -> None:
+            self.raw_calls = 0
+            self.messages: list[list[dict[str, object]]] = []
+
+        def complete_raw(self, _system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.raw_calls += 1
+            self.messages.append(messages)
+            if self.raw_calls == 1:
+                return (
+                    '{"reply":{"segments":[{"ja":"クリックするね。","zh":"我来点击。","tone":"中性"}]},'
+                    '"tool_calls":[{"name":"windows__Click","arguments":{"loc":[180,615]},"reason":"点击搜索结果链接"}]}'
+                )
+            assert "浏览器页面内部操作" in str(messages)
+            assert "browser__browser_snapshot" in str(messages)
+            return (
+                '{"reply":{"segments":[{"ja":"ブラウザの操作に戻したよ。","zh":"已经切回浏览器操作了。","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+    called = {"windows_click": False}
+
+    def windows_click(_arguments):  # type: ignore[no-untyped-def]
+        called["windows_click"] = True
+        return {"clicked": True}
+
+    registry = ToolRegistry(
+        [
+            Tool(name="browser__browser_snapshot", description="浏览器页面快照", handler=lambda _arguments: {}),
+            Tool(name="browser__browser_click", description="浏览器点击", handler=lambda _arguments: {}),
+            Tool(
+                name="windows__Click",
+                description="桌面点击",
+                handler=windows_click,
+                requires_confirmation=True,
+                risk="high",
+            ),
+        ]
+    )
+    client = MisroutedClickClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    result = runtime.handle_user_message(
+        [
+            {"role": "user", "content": "打开浏览器搜一下二阶堂真红"},
+            {
+                "role": "user",
+                "content": '工具执行结果如下：[{"tool_name":"browser__browser_type","success":true}]',
+            },
+            {"role": "user", "content": "帮我点进百科看看"},
+        ]
+    )
+
+    assert result.reply.translation == "已经切回浏览器操作了。"
+    assert [action.payload["tool_name"] for action in result.actions] == ["runtime"]
+    assert not any(action.type == "pending_action" for action in result.actions)
+    assert not called["windows_click"]
+    assert client.raw_calls == 2
+
+
+def test_desktop_task_still_exposes_windows_mouse_tools() -> None:
+    class PromptCaptureClient:
+        def __init__(self) -> None:
+            self.prompt = ""
+
+        def complete_raw(self, system_prompt, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.prompt = system_prompt
+            return (
+                '{"reply":{"segments":[{"ja":"見ておくね。","zh":"我看一下。","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+    registry = ToolRegistry(
+        [
+            Tool(name="browser__browser_snapshot", description="浏览器页面快照", handler=lambda _arguments: {}),
+            Tool(name="windows__Snapshot", description="桌面快照", handler=lambda _arguments: {}),
+            Tool(name="windows__Click", description="桌面点击", handler=lambda _arguments: {}),
+        ]
+    )
+    client = PromptCaptureClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+
+    runtime.handle_user_message([{"role": "user", "content": "帮我打开此电脑图标"}])
+
+    assert '"name": "windows__Snapshot"' in client.prompt
+    assert '"name": "windows__Click"' in client.prompt
+
+
+def test_agent_runtime_continues_after_confirmed_action_with_context() -> None:
+    class ConfirmedContinuationClient:
+        def __init__(self) -> None:
+            self.raw_calls = 0
+            self.prompts: list[str] = []
+            self.messages: list[list[dict[str, object]]] = []
+
+        def complete_raw(self, system_prompt, messages, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            self.raw_calls += 1
+            self.prompts.append(system_prompt)
+            self.messages.append(messages)
+            if self.raw_calls == 1:
+                assert "帮我打开桌面上的回收站" in str(messages)
+                assert "Pressed win+r." in str(messages)
+                assert "确认动作续接规则" in system_prompt
+                return (
+                    '{"reply":{"segments":[{"ja":"続けて入力するね。","zh":"我继续输入命令。","tone":"中性"}]},'
+                    '"tool_calls":[{"name":"type_tool","arguments":{"text":"shell:RecycleBinFolder"},"reason":"运行窗口已打开，继续输入回收站命令"}]}'
+                )
+            assert "shell:RecycleBinFolder" in str(messages)
+            return (
+                '{"reply":{"segments":[{"ja":"開けたよ。","zh":"已经打开了。","tone":"中性"}]},'
+                '"tool_calls":[]}'
+            )
+
+        def chat(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("确认动作有上下文时应回到工具循环，而不是直接总结。")
+
+    registry = ToolRegistry(
+        [
+            Tool(
+                name="shortcut_tool",
+                description="快捷键工具",
+                handler=lambda _arguments: "Pressed win+r.",
+            ),
+            Tool(
+                name="type_tool",
+                description="输入工具",
+                handler=lambda arguments: {"typed": arguments["text"]},
+            ),
+        ]
+    )
+    client = ConfirmedContinuationClient()
+    runtime = AgentRuntime(
+        api_client=client,  # type: ignore[arg-type]
+        system_prompt="你是 Sakura。",
+        tools=registry,
+    )
+    action = PendingToolAction.create(
+        "shortcut_tool",
+        {"shortcut": "win+r"},
+        "通过运行窗口输入命令来直接打开回收站。",
+    ).with_continuation_messages(
+        [
+            {"role": "user", "content": "帮我打开桌面上的回收站"},
+            {
+                "role": "assistant",
+                "content": "我会先打开运行窗口，然后输入回收站命令。",
+            },
+        ]
+    )
+
+    result = runtime.handle_confirmed_action(action)
+
+    assert result.reply.translation == "已经打开了。"
+    assert [agent_action.payload["tool_name"] for agent_action in result.actions] == [
+        "shortcut_tool",
+        "type_tool",
+    ]
+    assert client.raw_calls == 2
+
+
 def test_agent_runtime_extracts_planner_json_from_mixed_output() -> None:
     class MixedPlannerClient:
         def __init__(self) -> None:

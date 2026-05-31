@@ -8,6 +8,7 @@ import uuid
 import pytest
 
 from app.api_client import ApiSettings
+from app.chat_reply import ChatSegment
 from app.portrait_utils import portrait_kind_key, should_crossfade_portrait
 from app.proactive_care import ProactiveCareSettings
 from app.screen_observation import ScreenObservation
@@ -690,3 +691,89 @@ def _minimal_tts_settings() -> GPTSoVITSTTSSettings:
         text_lang="ja",
         timeout_seconds=1,
     )
+
+
+def test_reply_segments_queue_while_current_segment_is_active() -> None:
+    from app.pet_window import PetWindow
+
+    class MinimalReplyWindow:
+        _show_reply_segments = PetWindow._show_reply_segments
+        _start_reply_segments_now = PetWindow._start_reply_segments_now
+        _is_reply_sequence_active = PetWindow._is_reply_sequence_active
+        _show_next_reply_segment = PetWindow._show_next_reply_segment
+        _end_interaction_if_reply_done = PetWindow._end_interaction_if_reply_done
+        _show_next_queued_reply_batch = PetWindow._show_next_queued_reply_batch
+        _reset_current_segment_progress = PetWindow._reset_current_segment_progress
+
+    class DummyTTS:
+        def __init__(self) -> None:
+            self.spoken: list[str] = []
+
+        def speak(self, text, tone, on_finished=None, on_started=None):  # type: ignore[no-untyped-def]
+            self.spoken.append(text)
+
+    window = MinimalReplyWindow()
+    window.reply_sequence_id = 0
+    window.reply_advance_token = 0
+    window.pending_reply_segments = []
+    window.queued_reply_segment_batches = []
+    window.current_segment = None
+    window.current_segment_sequence_id = None
+    window.current_segment_speech_done = False
+    window.current_segment_tts_done = True
+    window.reply_advance_scheduled = False
+    window.active_interaction_id = "interaction-1"
+    window.tts_provider = DummyTTS()
+    window._log_interaction_stage = lambda *_args, **_kwargs: None
+    window._preload_portrait_for_segment = lambda _segment: None
+    window._take_prepared_tts_for_segment = lambda _segment: None
+    window._prepare_next_reply_segment = lambda: None
+    window._discard_prepared_next_tts = lambda: None
+    ended = []
+    window._end_interaction = lambda outcome: ended.append(outcome)
+
+    first = ChatSegment("先找到了", "中性", "先找到了")
+    second = ChatSegment("执行前确认", "提醒", "执行前确认")
+
+    window._show_reply_segments([first])
+    assert window.current_segment == first
+
+    window._show_reply_segments([second])
+    assert window.current_segment == first
+    assert window.queued_reply_segment_batches == [[second]]
+    assert ended == []
+
+    window.current_segment_speech_done = True
+    window.current_segment_tts_done = True
+    window._end_interaction_if_reply_done()
+
+    assert window.current_segment == second
+    assert window.queued_reply_segment_batches == []
+    assert ended == []
+
+
+def test_action_resolution_clears_queued_reply_batches() -> None:
+    from app.pet_window import PetWindow
+
+    class MinimalActionWindow:
+        _clear_queued_reply_segments_for_action_resolution = (
+            PetWindow._clear_queued_reply_segments_for_action_resolution
+        )
+
+    window = MinimalActionWindow()
+    window.queued_reply_segment_batches = [
+        [ChatSegment("先打开运行窗口")],
+        [ChatSegment("执行前确认")],
+    ]
+    stages = []
+    window._log_interaction_stage = lambda stage, payload=None: stages.append((stage, payload))
+
+    window._clear_queued_reply_segments_for_action_resolution()
+
+    assert window.queued_reply_segment_batches == []
+    assert stages == [
+        (
+            "queued_reply_segments_cleared_for_action",
+            {"cleared_batch_count": 2},
+        )
+    ]

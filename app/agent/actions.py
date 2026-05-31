@@ -42,6 +42,7 @@ class PendingToolAction:
     arguments: dict[str, Any]
     reason: str
     created_at: str
+    continuation_messages: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def create(
@@ -75,22 +76,47 @@ class PendingToolAction:
             reason = ""
         if not isinstance(created_at, str) or not created_at.strip():
             created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        continuation_messages = data.get("continuation_messages", [])
+        if not isinstance(continuation_messages, list):
+            continuation_messages = []
         return cls(
             id=action_id.strip(),
             tool_name=tool_name.strip(),
             arguments=dict(arguments),
             reason=reason.strip(),
             created_at=created_at.strip(),
+            continuation_messages=[
+                dict(message)
+                for message in continuation_messages
+                if isinstance(message, dict)
+            ],
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def with_continuation_messages(
+        self,
+        continuation_messages: list[dict[str, Any]],
+    ) -> "PendingToolAction":
+        """附带确认后继续推理所需的轻量对话上下文。"""
+        return PendingToolAction(
+            id=self.id,
+            tool_name=self.tool_name,
+            arguments=dict(self.arguments),
+            reason=self.reason,
+            created_at=self.created_at,
+            continuation_messages=[dict(message) for message in continuation_messages],
+        )
+
+    def to_dict(self, *, include_context: bool = False) -> dict[str, Any]:
+        data = {
             "id": self.id,
             "tool_name": self.tool_name,
             "arguments": self.arguments,
             "reason": self.reason,
             "created_at": self.created_at,
         }
+        if include_context and self.continuation_messages:
+            data["continuation_messages"] = self.continuation_messages
+        return data
 
 
 @dataclass(frozen=True)

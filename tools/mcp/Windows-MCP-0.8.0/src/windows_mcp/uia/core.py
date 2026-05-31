@@ -217,6 +217,11 @@ def mouse_event(dwFlags: int, dx: int, dy: int, dwData: int, dwExtraInfo: int) -
     ctypes.windll.user32.mouse_event(dwFlags, dx, dy, dwData, dwExtraInfo)
 
 
+def _mouse_button_event(dwFlags: int) -> None:
+    """在当前光标位置触发鼠标按键事件，避免多显示器 Absolute 坐标归一化偏移。"""
+    mouse_event(dwFlags, 0, 0, 0, 0)
+
+
 def keybd_event(bVk: int, bScan: int, dwFlags: int, dwExtraInfo: int) -> None:
     """keybd_event from Win32."""
     ctypes.windll.user32.keybd_event(bVk, bScan, dwFlags, dwExtraInfo)
@@ -259,22 +264,9 @@ def Click(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
     waitTime: float.
     """
     SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.LeftDown | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.LeftDown)
     time.sleep(0.05)
-    mouse_event(
-        MouseEventFlag.LeftUp | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.LeftUp)
     time.sleep(waitTime)
 
 
@@ -286,22 +278,9 @@ def MiddleClick(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
     waitTime: float.
     """
     SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.MiddleDown | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.MiddleDown)
     time.sleep(0.05)
-    mouse_event(
-        MouseEventFlag.MiddleUp | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.MiddleUp)
     time.sleep(waitTime)
 
 
@@ -313,22 +292,9 @@ def RightClick(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
     waitTime: float.
     """
     SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.RightDown | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.RightDown)
     time.sleep(0.05)
-    mouse_event(
-        MouseEventFlag.RightUp | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.RightUp)
     time.sleep(waitTime)
 
 
@@ -340,14 +306,7 @@ def PressMouse(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> None:
     waitTime: float.
     """
     SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.LeftDown | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.LeftDown)
     time.sleep(waitTime)
 
 
@@ -356,15 +315,7 @@ def ReleaseMouse(waitTime: float = OPERATION_WAIT_TIME) -> None:
     Release left mouse.
     waitTime: float.
     """
-    x, y = GetCursorPos()
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.LeftUp | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.LeftUp)
     time.sleep(waitTime)
 
 
@@ -376,14 +327,7 @@ def RightPressMouse(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> No
     waitTime: float.
     """
     SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.RightDown | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.RightDown)
     time.sleep(waitTime)
 
 
@@ -392,15 +336,7 @@ def RightReleaseMouse(waitTime: float = OPERATION_WAIT_TIME) -> None:
     Release right mouse.
     waitTime: float.
     """
-    x, y = GetCursorPos()
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.RightUp | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.RightUp)
     time.sleep(waitTime)
 
 
@@ -412,14 +348,7 @@ def MiddlePressMouse(x: int, y: int, waitTime: float = OPERATION_WAIT_TIME) -> N
     waitTime: float.
     """
     SetCursorPos(x, y)
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.MiddleDown | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.MiddleDown)
     time.sleep(waitTime)
 
 
@@ -428,15 +357,7 @@ def MiddleReleaseMouse(waitTime: float = OPERATION_WAIT_TIME) -> None:
     Release middle mouse.
     waitTime: float.
     """
-    x, y = GetCursorPos()
-    screenWidth, screenHeight = GetScreenSize()
-    mouse_event(
-        MouseEventFlag.MiddleUp | MouseEventFlag.Absolute,
-        x * 65535 // screenWidth,
-        y * 65535 // screenHeight,
-        0,
-        0,
-    )
+    _mouse_button_event(MouseEventFlag.MiddleUp)
     time.sleep(waitTime)
 
 

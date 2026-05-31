@@ -13,6 +13,7 @@ from fastmcp.utilities.types import Image
 from textwrap import dedent
 from windows_mcp.desktop.service import Desktop, Size
 from windows_mcp.desktop.utils import remove_private_use_chars
+import windows_mcp.uia as uia
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,31 @@ def _snapshot_profile_enabled() -> bool:
 
 def _as_bool(value: bool | str) -> bool:
     return value is True or (isinstance(value, str) and value.lower() == "true")
+
+
+def _rect_to_xyxy_string(rect: object) -> str:
+    if isinstance(rect, tuple) and len(rect) == 4:
+        left, top, width, height = rect
+        return f"({left},{top},{left + width},{top + height})"
+    return f"({rect.left},{rect.top},{rect.right},{rect.bottom})"
+
+
+def _display_layout_metadata() -> str:
+    try:
+        virtual_rect = uia.GetVirtualScreenRect()
+        monitor_rects = uia.GetMonitorsRect()
+    except Exception as exc:
+        logger.debug("Failed to read display layout metadata: %s", exc)
+        return ""
+
+    lines = [f"Virtual Screen: {_rect_to_xyxy_string(virtual_rect)}"]
+    if monitor_rects:
+        displays = [
+            f"{index}:{_rect_to_xyxy_string(rect)}"
+            for index, rect in enumerate(monitor_rects)
+        ]
+        lines.append(f"Available Displays: {', '.join(displays)}")
+    return "\n".join(lines) + "\n"
 
 
 def capture_desktop_state(
@@ -155,6 +181,7 @@ def build_snapshot_response(
     semantic_tree = remove_private_use_chars(semantic_tree)
 
     metadata_text = f"Cursor Position: {desktop_state.cursor_position}\n"
+    metadata_text += _display_layout_metadata()
     if desktop_state.screenshot_original_size:
         metadata_text += (
             f"Screenshot Original Size: {desktop_state.screenshot_original_size.to_string()}"
