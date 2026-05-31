@@ -13,6 +13,15 @@ from app.agent.screen_tools import (
     SCREEN_OBSERVATION_DISABLED_ERROR,
     SCREEN_OBSERVATION_REQUEST_ACTION,
 )
+from app.agent.screen_policy import ScreenPolicy
+from app.agent.tool_policy import (
+    BROWSER_NAVIGATE_TOOL_NAME,
+    BROWSER_SNAPSHOT_TOOL_NAME,
+    ToolPolicy,
+    WINDOWS_CLICK_TOOL_NAME,
+    WINDOWS_SCREENSHOT_TOOL_NAME,
+    WINDOWS_SNAPSHOT_TOOL_NAME,
+)
 from app.agent.tool_registry import ToolExecutionResult, ToolRegistry
 from app.api_client import (
     ApiRequestError,
@@ -29,10 +38,6 @@ from app.prompt_templates import (
     build_event_reply_protocol,
     build_proactive_rules,
 )
-from app.screen_observation import (
-    MANUAL_SCREEN_OBSERVATION_HISTORY_MARKER,
-    SCREEN_OBSERVATION_HISTORY_MARKER,
-)
 
 
 MAX_AGENT_STEPS_PER_TURN = 4
@@ -41,31 +46,6 @@ MAX_TOOL_CALLS_PER_TURN = 8
 MAX_TOOL_RESULT_CHARS = 6000
 MAX_PENDING_CONTEXT_MESSAGES = 12
 MAX_PENDING_CONTEXT_TEXT_CHARS = 4000
-WINDOWS_CLICK_TOOL_NAME = "windows__Click"
-WINDOWS_SCREENSHOT_TOOL_NAME = "windows__Screenshot"
-WINDOWS_SNAPSHOT_TOOL_NAME = "windows__Snapshot"
-WINDOWS_BROWSER_PAGE_CONFLICT_TOOL_NAMES = {
-    WINDOWS_CLICK_TOOL_NAME,
-    WINDOWS_SCREENSHOT_TOOL_NAME,
-    WINDOWS_SNAPSHOT_TOOL_NAME,
-    "windows__Type",
-    "windows__Scroll",
-    "windows__Move",
-}
-BROWSER_NAVIGATE_TOOL_NAME = "browser__browser_navigate"
-BROWSER_SNAPSHOT_TOOL_NAME = "browser__browser_snapshot"
-BROWSER_DOM_TOOL_NAMES = {
-    BROWSER_NAVIGATE_TOOL_NAME,
-    BROWSER_SNAPSHOT_TOOL_NAME,
-    "browser__browser_click",
-    "browser__browser_type",
-    "browser__browser_wait_for",
-    "browser__browser_mouse_wheel",
-}
-WEB_BACKGROUND_TOOL_NAMES = {
-    "web__web_search",
-    "web__fetch_url",
-}
 ProgressCallback = Callable[[AgentProgress], None]
 
 
@@ -939,33 +919,28 @@ def _filter_tools_for_browser_routing(
     browser_page_mode: bool,
     visible_browser_mode: bool,
 ) -> list[dict[str, Any]]:
-    """按浏览器路由模式隐藏容易诱导模型走错路径的工具。"""
-    if not browser_page_mode and not visible_browser_mode:
-        return tools
-    hidden_names: set[str] = set()
-    if browser_page_mode:
-        hidden_names.update(WINDOWS_BROWSER_PAGE_CONFLICT_TOOL_NAMES)
-    if visible_browser_mode:
-        hidden_names.update(WEB_BACKGROUND_TOOL_NAMES)
-    return [tool for tool in tools if str(tool.get("name", "")) not in hidden_names]
+    return ToolPolicy.filter_tools_for_browser_routing(
+        tools,
+        browser_page_mode=browser_page_mode,
+        visible_browser_mode=visible_browser_mode,
+    )
 
 
 def _should_block_windows_tool_for_browser_page(
     call: dict[str, Any],
     browser_page_mode: bool,
 ) -> bool:
-    if not browser_page_mode:
-        return False
-    return str(call.get("name", "")) in WINDOWS_BROWSER_PAGE_CONFLICT_TOOL_NAMES
+    return ToolPolicy.should_block_windows_tool_for_browser_page(call, browser_page_mode)
 
 
 def _should_block_background_web_tool_for_visible_browser(
     call: dict[str, Any],
     visible_browser_mode: bool,
 ) -> bool:
-    if not visible_browser_mode:
-        return False
-    return str(call.get("name", "")) in WEB_BACKGROUND_TOOL_NAMES
+    return ToolPolicy.should_block_background_web_tool_for_visible_browser(
+        call,
+        visible_browser_mode,
+    )
 
 
 def _should_auto_snapshot_after_browser_navigation(
@@ -973,14 +948,10 @@ def _should_auto_snapshot_after_browser_navigation(
     step_results: list[ToolExecutionResult],
     tools: ToolRegistry,
 ) -> bool:
-    """浏览器导航成功后自动补一次只读页面快照，减少固定流程的模型往返。"""
-    if tools.get(BROWSER_SNAPSHOT_TOOL_NAME) is None:
-        return False
-    if any(call.get("name") == BROWSER_SNAPSHOT_TOOL_NAME for call in tool_calls):
-        return False
-    return any(
-        result.tool_name == BROWSER_NAVIGATE_TOOL_NAME and result.success
-        for result in step_results
+    return ToolPolicy.should_auto_snapshot_after_browser_navigation(
+        tool_calls,
+        step_results,
+        tools,
     )
 
 
@@ -1211,7 +1182,7 @@ def _build_visible_browser_web_tool_block_result(call: dict[str, Any]) -> ToolEx
 
 
 def _browser_dom_tools_available(tools: ToolRegistry) -> bool:
-    return any(tools.get(name) is not None for name in BROWSER_DOM_TOOL_NAMES)
+    return ToolPolicy.browser_dom_tools_available(tools)
 
 
 def _should_prefer_browser_page_tools(messages: list[ChatMessage]) -> bool:
@@ -1351,14 +1322,7 @@ def _build_screen_and_desktop_routing_rule(allow_screen_observation: bool) -> st
 
 
 def _should_offer_screen_observation(messages: list[ChatMessage]) -> bool:
-    """只在当前轮仍有可关联用户消息时开放自主屏幕观察。"""
-    text = _latest_user_text(messages)
-    if text is None:
-        return False
-    return (
-        SCREEN_OBSERVATION_HISTORY_MARKER not in text
-        and MANUAL_SCREEN_OBSERVATION_HISTORY_MARKER not in text
-    )
+    return ScreenPolicy.should_offer_screen_observation_text(_latest_user_text(messages))
 
 
 def _latest_user_text(messages: list[ChatMessage]) -> str | None:

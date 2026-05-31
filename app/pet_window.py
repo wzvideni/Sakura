@@ -6,41 +6,30 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import (
-    QObject,
     QEasingCurve,
     QEvent,
     QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
     QRect,
-    QRectF,
-    Signal,
     Qt,
     QThread,
     QTimer,
     Slot,
 )
 from PySide6.QtGui import (
-    QAction,
-    QColor,
     QCursor,
     QFont,
-    QFontDatabase,
     QIcon,
     QKeyEvent,
     QMouseEvent,
-    QPainter,
-    QPainterPath,
     QPixmap,
 )
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFrame,
-    QGraphicsBlurEffect,
     QGraphicsOpacityEffect,
-    QGraphicsPixmapItem,
-    QGraphicsScene,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -68,6 +57,7 @@ from app.agent.memory_curator import (
     MemoryCurationSettings,
     MemoryCurationState,
 )
+from app.agent.memory_curation_worker import MemoryCurationWorker
 from app.agent.mcp import MCPRuntimeSettings, MCPToolProvider, register_mcp_tools_from_config
 from app.agent.screen_tools import SCREEN_OBSERVATION_REQUEST_ACTION
 from app.api_client import OpenAICompatibleClient
@@ -118,6 +108,15 @@ from app.visual_observation import (
     generate_visual_observation_id,
     should_inject_visual_context,
 )
+from app.ui.fonts import _rounded_chinese_font, _rounded_japanese_font
+from app.ui import (
+    FrostedGlassFrame,
+    MANUAL_SCREENSHOT_MIN_SIZE,
+    ManualScreenshotOverlay,
+    PET_WINDOW_STYLEHEET,
+    build_pet_tray_menu,
+    capture_virtual_desktop_pixmap,
+)
 
 
 SPEECH_TYPING_INTERVAL_MS = 35
@@ -130,153 +129,6 @@ SUBTITLE_LANGUAGE_ZH = "zh"
 SCREEN_OBSERVATION_ENABLED_KEY = "SCREEN_OBSERVATION_ENABLED"
 AUTONOMOUS_SCREEN_OBSERVATION_ENABLED_KEY = "AUTONOMOUS_SCREEN_OBSERVATION_ENABLED"
 MANUAL_SCREENSHOT_DEFAULT_TEXT = "请根据我框选的截图继续对话。"
-MANUAL_SCREENSHOT_MIN_SIZE = 8
-
-
-class MemoryCurationWorker(QObject):
-    finished = Signal(object)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        curator: MemoryCurator,
-        entries: list[ChatHistoryEntry],
-    ) -> None:
-        super().__init__()
-        self.curator = curator
-        self.entries = entries
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            result = self.curator.curate_entries(self.entries)
-        except Exception as exc:  # 后台整理失败不能影响主聊天。
-            self.failed.emit(str(exc))
-            return
-        self.finished.emit(result)
-
-
-class FrostedGlassFrame(QFrame):
-    """绘制带高斯模糊取样的半透明文本框遮罩。"""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._source_widgets: tuple[QWidget, ...] = ()
-        self._blur_radius = 18.0
-        self._corner_radius = 19.0
-        self._tint = QColor(255, 255, 255, 92)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-
-    def set_source_widgets(self, widgets: tuple[QWidget, ...]) -> None:
-        self._source_widgets = widgets
-
-    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        del event
-        source = QPixmap(self.size())
-        source.fill(Qt.GlobalColor.transparent)
-
-        source_painter = QPainter(source)
-        for widget in self._source_widgets:
-            if widget.isVisible():
-                widget_origin = self.mapFromGlobal(widget.mapToGlobal(QPoint(0, 0)))
-                widget.render(source_painter, widget_origin)
-        source_painter.end()
-
-        blurred = _blur_pixmap(source, self._blur_radius)
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        path = QPainterPath()
-        path.addRoundedRect(rect, self._corner_radius, self._corner_radius)
-
-        painter.setClipPath(path)
-        painter.drawPixmap(0, 0, blurred)
-        painter.fillPath(path, self._tint)
-        painter.end()
-
-
-class ManualScreenshotOverlay(QWidget):
-    """全屏框选覆盖层，用于生成手动截图上下文。"""
-
-    selected = Signal(object)
-    cancelled = Signal()
-
-    def __init__(self, desktop_pixmap: QPixmap, virtual_geometry: QRect) -> None:
-        super().__init__(None)
-        self.desktop_pixmap = desktop_pixmap
-        self.virtual_geometry = QRect(virtual_geometry)
-        self.selection_start: QPoint | None = None
-        self.selection_end: QPoint | None = None
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setCursor(Qt.CursorShape.CrossCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setGeometry(self.virtual_geometry)
-
-    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        del event
-        painter = QPainter(self)
-        painter.drawPixmap(self.rect(), self.desktop_pixmap)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 95))
-
-        selection = self._selection_rect()
-        if not selection.isNull():
-            painter.drawPixmap(selection, self.desktop_pixmap, selection)
-            painter.fillRect(selection, QColor(255, 255, 255, 28))
-            painter.setPen(QColor(74, 170, 214, 245))
-            painter.drawRect(selection.adjusted(0, 0, -1, -1))
-        painter.end()
-
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.RightButton:
-            self._cancel()
-            return
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        self.selection_start = event.position().toPoint()
-        self.selection_end = self.selection_start
-        self.update()
-
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self.selection_start is None:
-            return
-        self.selection_end = event.position().toPoint()
-        self.update()
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() != Qt.MouseButton.LeftButton or self.selection_start is None:
-            return
-        self.selection_end = event.position().toPoint()
-        selection = self._selection_rect()
-        if (
-            selection.width() < MANUAL_SCREENSHOT_MIN_SIZE
-            or selection.height() < MANUAL_SCREENSHOT_MIN_SIZE
-        ):
-            self._cancel()
-            return
-        self.selected.emit(self.desktop_pixmap.copy(selection))
-        self.close()
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() == Qt.Key.Key_Escape:
-            self._cancel()
-            return
-        super().keyPressEvent(event)
-
-    def _selection_rect(self) -> QRect:
-        if self.selection_start is None or self.selection_end is None:
-            return QRect()
-        return QRect(self.selection_start, self.selection_end).normalized().intersected(self.rect())
-
-    def _cancel(self) -> None:
-        self.cancelled.emit()
-        self.close()
 
 
 class PetWindow(QWidget):
@@ -513,104 +365,7 @@ class PetWindow(QWidget):
         input_layout.addWidget(self.send_button)
         self.input_bar.setLayout(input_layout)
 
-        self.setStyleSheet(
-            """
-            #speechBubble {
-                background: rgba(255, 232, 241, 220);
-                border: 1px solid rgba(238, 172, 200, 158);
-                border-radius: 26px;
-            }
-            #speakerName {
-                color: #d55b91;
-                font-size: 13px;
-                font-weight: 700;
-            }
-            #speechText {
-                color: #4b3440;
-                font-size: 19px;
-                line-height: 1.35;
-            }
-            #inputBar {
-                background: transparent;
-                border: none;
-            }
-            #petInput {
-                background: rgba(255, 255, 255, 96);
-                border: 1px solid rgba(255, 255, 255, 218);
-                border-radius: 19px;
-                color: #2f2630;
-                font-size: 15px;
-                font-weight: 700;
-                padding: 3px 16px;
-                selection-background-color: rgba(74, 170, 214, 185);
-            }
-            #petInput:focus {
-                background: rgba(255, 255, 255, 132);
-                border: 1px solid rgba(74, 170, 214, 230);
-            }
-            #petInput:disabled {
-                color: rgba(47, 38, 48, 150);
-            }
-            #sendButton {
-                background: rgba(74, 170, 214, 225);
-                border: none;
-                border-radius: 16px;
-                color: white;
-                font-size: 15px;
-                font-weight: 800;
-                min-width: 68px;
-                padding: 4px 14px;
-            }
-            #sendButton:hover {
-                background: rgba(48, 145, 195, 235);
-            }
-            #sendButton:disabled {
-                background: rgba(126, 171, 193, 190);
-            }
-            #screenshotButton {
-                background: rgba(255, 255, 255, 116);
-                border: 1px solid rgba(255, 255, 255, 218);
-                border-radius: 16px;
-                color: #4b3440;
-                font-size: 15px;
-                font-weight: 800;
-                min-width: 58px;
-                padding: 4px 12px;
-            }
-            #screenshotButton:hover {
-                background: rgba(255, 255, 255, 150);
-            }
-            #screenshotButton[screenshotAttached="true"] {
-                background: rgba(93, 181, 130, 225);
-                border: none;
-                color: white;
-            }
-            #screenshotButton:disabled {
-                background: rgba(176, 181, 184, 150);
-                color: rgba(75, 52, 64, 135);
-            }
-            #confirmActionButton {
-                background: rgba(93, 181, 130, 225);
-                border: none;
-                border-radius: 16px;
-                color: white;
-                font-size: 15px;
-                font-weight: 800;
-                min-width: 58px;
-                padding: 4px 12px;
-            }
-            #cancelActionButton {
-                background: rgba(180, 130, 146, 210);
-                border: none;
-                border-radius: 16px;
-                color: white;
-                font-size: 15px;
-                font-weight: 800;
-                min-width: 58px;
-                padding: 4px 12px;
-            }
-            """
-        )
+        self.setStyleSheet(PET_WINDOW_STYLEHEET)
         self._apply_fonts()
         for drag_widget in (
             self.label,
@@ -885,43 +640,16 @@ class PetWindow(QWidget):
         self.tray_icon.show()
 
     def _build_menu(self) -> QMenu:
-        menu = QMenu(self)
-
-        hide_action = QAction("隐藏至托盘", self)
-        hide_action.triggered.connect(self.hide)
-        menu.addAction(hide_action)
-
-        menu.addSeparator()
-
-        subtitle_action = QAction("显示中文字幕", self)
-        subtitle_action.setCheckable(True)
-        subtitle_action.setChecked(self.subtitle_language == SUBTITLE_LANGUAGE_ZH)
-        subtitle_action.triggered.connect(self._toggle_chinese_subtitles)
-        menu.addAction(subtitle_action)
-
-        free_access_action = QAction("完整访问权限", self)
-        free_access_action.setCheckable(True)
-        free_access_action.setChecked(self.free_access_enabled)
-        free_access_action.triggered.connect(self._toggle_free_access)
-        menu.addAction(free_access_action)
-
-        menu.addSeparator()
-
-        history_action = QAction("历史记录", self)
-        history_action.triggered.connect(self.show_history)
-        menu.addAction(history_action)
-
-        settings_action = QAction("设置", self)
-        settings_action.triggered.connect(self.show_settings)
-        menu.addAction(settings_action)
-
-        menu.addSeparator()
-
-        quit_action = QAction("退出", self)
-        quit_action.triggered.connect(QApplication.quit)
-        menu.addAction(quit_action)
-
-        return menu
+        return build_pet_tray_menu(
+            self,
+            chinese_subtitles_checked=self.subtitle_language == SUBTITLE_LANGUAGE_ZH,
+            free_access_checked=self.free_access_enabled,
+            on_hide=self.hide,
+            on_toggle_chinese_subtitles=self._toggle_chinese_subtitles,
+            on_toggle_free_access=self._toggle_free_access,
+            on_show_history=self.show_history,
+            on_show_settings=self.show_settings,
+        )
 
     def _show_context_menu(self, position: QPoint) -> None:
         _ = position
@@ -1037,35 +765,7 @@ class PetWindow(QWidget):
         overlay.activateWindow()
 
     def _capture_virtual_desktop_pixmap(self) -> tuple[QPixmap, QRect]:
-        screens = QApplication.screens()
-        if not screens:
-            raise RuntimeError("无法找到可截图的屏幕。")
-
-        virtual_geometry = QRect()
-        for screen in screens:
-            virtual_geometry = virtual_geometry.united(screen.geometry())
-        if virtual_geometry.isNull():
-            raise RuntimeError("无法获取虚拟桌面区域。")
-
-        desktop_pixmap = QPixmap(virtual_geometry.size())
-        desktop_pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(desktop_pixmap)
-        captured_count = 0
-        for screen in screens:
-            screen_pixmap = screen.grabWindow(0)
-            if screen_pixmap.isNull():
-                continue
-            target_rect = QRect(
-                screen.geometry().topLeft() - virtual_geometry.topLeft(),
-                screen.geometry().size(),
-            )
-            painter.drawPixmap(target_rect, screen_pixmap)
-            captured_count += 1
-        painter.end()
-
-        if captured_count == 0:
-            raise RuntimeError("屏幕截图为空，可能被系统权限或显示环境阻止。")
-        return desktop_pixmap, virtual_geometry
+        return capture_virtual_desktop_pixmap()
 
     @Slot(object)
     def _handle_manual_screenshot_selected(self, pixmap: QPixmap) -> None:
@@ -2848,65 +2548,3 @@ def _parse_bool(value: str | None, default: bool = False) -> bool:
 
 def _format_bool(value: bool) -> str:
     return "true" if value else "false"
-
-
-def _blur_pixmap(pixmap: QPixmap, radius: float) -> QPixmap:
-    if pixmap.isNull() or radius <= 0:
-        return pixmap
-
-    scene = QGraphicsScene()
-    item = QGraphicsPixmapItem(pixmap)
-    effect = QGraphicsBlurEffect()
-    effect.setBlurRadius(radius)
-    effect.setBlurHints(QGraphicsBlurEffect.BlurHint.QualityHint)
-    item.setGraphicsEffect(effect)
-    scene.addItem(item)
-    scene.setSceneRect(QRectF(pixmap.rect()))
-
-    result = QPixmap(pixmap.size())
-    result.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(result)
-    scene.render(painter, QRectF(result.rect()), QRectF(pixmap.rect()))
-    painter.end()
-    return result
-
-
-def _rounded_japanese_font(point_size: int, weight: QFont.Weight) -> QFont:
-    family = _choose_font_family([
-        "BIZ UDPGothic",
-        "Meiryo",
-        "Yu Gothic UI",
-        "Yu Gothic",
-        "MS PGothic",
-        "Microsoft YaHei UI",
-        "Segoe UI",
-    ])
-    font = QFont(family)
-    font.setPointSize(point_size)
-    font.setWeight(weight)
-    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-    return font
-
-
-def _rounded_chinese_font(point_size: int, weight: QFont.Weight) -> QFont:
-    family = _choose_font_family([
-        "Microsoft YaHei UI",
-        "Microsoft YaHei",
-        "Noto Sans CJK SC",
-        "Source Han Sans SC",
-        "SimHei",
-        "Segoe UI",
-    ])
-    font = QFont(family)
-    font.setPointSize(point_size)
-    font.setWeight(weight)
-    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-    return font
-
-
-def _choose_font_family(candidates: list[str]) -> str:
-    available = set(QFontDatabase.families())
-    for candidate in candidates:
-        if candidate in available:
-            return candidate
-    return candidates[-1]
