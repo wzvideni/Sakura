@@ -321,6 +321,7 @@ class PetWindow(QWidget):
         self.voice_playback_controller = VoicePlaybackController(
             self.tts_provider,
             self._log_interaction_stage,
+            lambda: str(getattr(getattr(self.tts_provider, "settings", None), "text_lang", "ja")),
         )
         self.subtitle_controller = SubtitleController(
             self.speech_label,

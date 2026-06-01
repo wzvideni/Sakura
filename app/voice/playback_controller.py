@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from app.llm.chat_reply import ChatSegment
 from app.core.debug_log import debug_log
+from app.voice.text_language_guard import should_skip_tts_text
 from app.voice.tts import TTSPreparedAudio, TTSProvider
 
 
@@ -18,9 +19,11 @@ class VoicePlaybackController:
         self,
         tts_provider: TTSProvider,
         log_stage: LogStageCallback,
+        target_text_lang_getter: Callable[[], str] | None = None,
     ) -> None:
         self.tts_provider = tts_provider
         self._log_stage = log_stage
+        self._target_text_lang_getter = target_text_lang_getter or (lambda: "ja")
         self._prepared_next_segment: ChatSegment | None = None
         self._prepared_next_tts: TTSPreparedAudio | None = None
 
@@ -37,6 +40,12 @@ class VoicePlaybackController:
     ) -> None:
         prepared_tts = self._take_prepared_tts_for_segment(segment)
         try:
+            if prepared_tts is None and self._should_skip_segment_tts(segment):
+                self._log_tts_skipped(segment, sequence_id, "speak")
+                on_started()
+                on_finished()
+                return
+
             if prepared_tts is None:
                 self._log_stage(
                     "tts_speak_requested",
@@ -81,6 +90,10 @@ class VoicePlaybackController:
             return
 
         self.discard_prepared()
+        if self._should_skip_segment_tts(next_segment):
+            self._log_tts_skipped(next_segment, None, "prepare")
+            return
+
         self._prepared_next_segment = next_segment
         self._log_stage(
             "next_segment_tts_prepare_requested",
@@ -135,3 +148,29 @@ class VoicePlaybackController:
         self._prepared_next_segment = None
         self._prepared_next_tts = None
         return prepared_tts
+
+    def _target_text_lang(self) -> str:
+        try:
+            return self._target_text_lang_getter()
+        except Exception as exc:  # noqa: BLE001
+            debug_log("TTS", "读取目标 TTS 文本语言失败，回退为 ja", {"error": str(exc)})
+            return "ja"
+
+    def _should_skip_segment_tts(self, segment: ChatSegment) -> bool:
+        return should_skip_tts_text(segment.text, self._target_text_lang())
+
+    def _log_tts_skipped(
+        self,
+        segment: ChatSegment,
+        sequence_id: int | None,
+        phase: str,
+    ) -> None:
+        payload = {
+            "sequence_id": sequence_id,
+            "phase": phase,
+            "text": segment.text,
+            "tone": segment.tone,
+            "target_lang": self._target_text_lang(),
+        }
+        self._log_stage("tts_skipped_language_guard", payload)
+        debug_log("TTS", "语言守卫跳过异常文本 TTS", payload)
