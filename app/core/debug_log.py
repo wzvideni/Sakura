@@ -196,7 +196,7 @@ def _read_bool(key: str, default: bool) -> bool:
 
 def _load_debug_values() -> dict[str, Any]:
     from app.config.yaml_config import load_yaml_mapping
-    config_path = Path(__file__).resolve().parents[1] / "data" / "config" / "system_config.yaml"
+    config_path = Path(__file__).resolve().parents[2] / "data" / "config" / "system_config.yaml"
     try:
         system_config = load_yaml_mapping(config_path)
     except (OSError, ValueError):
