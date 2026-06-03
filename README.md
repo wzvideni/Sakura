@@ -31,9 +31,7 @@ Release 里常见的文件含义如下：
 | 文件名 | 是什么 | 适合谁下载 |
 |:-:|---|---|
 | `sakura-v0.9.3-windows-x64.zip` | Windows 完整包，包含项目文件和 `runtime` | **Windows 新手首选** |
-| `sakura-runtime-windows-x64.zip` | 只有 Windows 预置 Python 运行环境 | 拉源码、缺 `runtime` 的用户 |
-| `sakura-v0.9.3-macos-arm64.zip` | macOS Apple Silicon 完整包 | Mac 用户实验使用，未实机测试 |
-| `sakura-runtime-macos-arm64.zip` | 只有 macOS 预置 Python 运行环境 | Mac 源码用户实验使用 |
+| `runtime-windows-x64.zip` | 只有 Windows 预置 Python 运行环境 | 拉源码、缺 `runtime` 的用户 |
 
 > 如果你只是想运行桌宠，下载 `sakura-v0.9.3-windows-x64.zip` 这种 **完整包**。`runtime` 包不是完整程序，单独下载后不能直接启动。
 
