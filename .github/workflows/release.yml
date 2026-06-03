@@ -32,6 +32,7 @@ jobs:
   test:
     needs: tag
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +41,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install system dependencies
+        timeout-minutes: 5
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -49,17 +51,21 @@ jobs:
             libglib2.0-0 libportaudio2 portaudio19-dev libpulse0
 
       - name: Install Python dependencies
+        timeout-minutes: 8
         run: |
           python -m pip install --upgrade pip -q
           pip install -r requirements.txt -q
-          pip install pytest-qt pytest-mock pytest-env -q
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt -q; else pip install pytest-qt pytest-mock pytest-env pytest-timeout -q; fi
 
       - name: Run tests
+        timeout-minutes: 6
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONIOENCODING: utf-8
+          PYTEST_QT_API: pyside6
         run: |
-          python -m pytest -v --tb=short --strict-markers -p no:warnings
+          set +e
+          python -m pytest -vv --tb=short --strict-markers -p no:warnings --timeout=60 --timeout-method=thread --durations=20
           EXIT_CODE=$?
           if [ $EXIT_CODE -eq 134 ]; then
             echo "::warning::Qt cleanup crash after all tests passed — treating as success"

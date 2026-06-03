@@ -1134,6 +1134,52 @@ def test_settings_dialog_loads_memory_on_open_in_background() -> None:
     app.processEvents()
 
 
+def test_settings_dialog_memory_loader_thread_is_not_dialog_child() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.settings_dialog import SettingsDialog
+
+    class BlockingMemoryStore:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def list_memories(self, *, limit: int = 20):  # type: ignore[no-untyped-def]
+            self.started.set()
+            assert self.release.wait(2)
+            return []
+
+    QApplication = qtwidgets.QApplication
+    app = QApplication.instance() or QApplication([])
+    memory_store = BlockingMemoryStore()
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="test-model",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=Path("."),
+        proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
+        memory_store=memory_store,  # type: ignore[arg-type]
+    )
+
+    try:
+        assert memory_store.started.wait(1.5)
+        assert dialog._memory_list_thread is not None
+        assert dialog._memory_list_thread.parent() is None
+    finally:
+        memory_store.release.set()
+
+    assert _process_events_until(app, lambda: dialog._memory_list_thread is None)
+    dialog.deleteLater()
+    app.processEvents()
+
+
 def test_settings_dialog_shows_memory_dependency_download_hint() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")

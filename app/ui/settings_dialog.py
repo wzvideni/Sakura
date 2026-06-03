@@ -762,7 +762,7 @@ class SettingsDialog(QDialog):
         self.memory_refresh_button.setEnabled(False)
         self._show_memory_placeholder(loading_text)
 
-        thread = QThread(self)
+        thread = QThread()
         worker = MemoryListWorker(self.memory_store, limit=200)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1334,6 +1334,10 @@ class SettingsDialog(QDialog):
         super().reject()
 
     def closeEvent(self, event):  # type: ignore[no-untyped-def]
+        if self._api_test_thread is not None:
+            QMessageBox.information(self, "测试中", "API 测试仍在进行，请等待完成后再关闭设置。")
+            event.ignore()
+            return
         if self._tts_test_thread is not None:
             QMessageBox.information(self, "检测中", "TTS 服务检测仍在进行，请等待完成后再关闭设置。")
             event.ignore()
@@ -1352,7 +1356,7 @@ class SettingsDialog(QDialog):
         self.api_test_button.setEnabled(False)
         self.api_test_button.setText("测试中...")
 
-        thread = QThread(self)
+        thread = QThread()
         worker = ApiConnectionTestWorker(settings)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1393,7 +1397,7 @@ class SettingsDialog(QDialog):
         self._pending_accept_values = dict(accept_values)
         self._set_tts_test_busy(True)
 
-        thread = QThread(self)
+        thread = QThread()
         worker = TTSTestWorker(settings)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1549,7 +1553,7 @@ class SettingsDialog(QDialog):
         output_path: Path,
     ) -> None:
         self._set_character_export_busy(True)
-        thread = QThread(self)
+        thread = QThread()
         worker = CharacterArchiveExportWorker(profile, output_path)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
