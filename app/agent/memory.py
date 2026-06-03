@@ -546,7 +546,7 @@ def _local_embedding_model_kwargs(model_name: str, base_dir: Path | None = None)
 
 
 def _embedding_model_cached(model_name: str, base_dir: Path | None = None) -> bool:
-    """判断本地是否已有嵌入模型缓存，避免每次启动误报下载提示。"""
+    """判断本地是否已有完整嵌入模型缓存，避免半下载缓存触发离线加载失败。"""
 
     cache_root = (
         os.environ.get("SENTENCE_TRANSFORMERS_HOME")
@@ -566,7 +566,26 @@ def _embedding_model_cached(model_name: str, base_dir: Path | None = None) -> bo
     model_cache_name = "models--" + model_name.replace("/", "--")
     for root in cache_candidates:
         snapshot_dir = root / model_cache_name / "snapshots"
-        if snapshot_dir.exists() and any(snapshot_dir.iterdir()):
+        if _hub_snapshot_has_model_weights(snapshot_dir):
+            return True
+    return False
+
+
+def _hub_snapshot_has_model_weights(snapshot_dir: Path) -> bool:
+    """确认 HuggingFace snapshot 至少包含可加载的模型权重。"""
+
+    if not snapshot_dir.is_dir():
+        return False
+    weight_filenames = {
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "pytorch_model.bin",
+        "pytorch_model.bin.index.json",
+    }
+    for revision_dir in snapshot_dir.iterdir():
+        if not revision_dir.is_dir():
+            continue
+        if any((revision_dir / filename).is_file() for filename in weight_filenames):
             return True
     return False
 
