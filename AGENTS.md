@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件约束在 `D:\Project\sakura` 仓库内工作的 AI Agent 行为。
+本文件约束在当前 Sakura 仓库内工作的 AI Agent 行为。
 
 ## 项目概览
 
