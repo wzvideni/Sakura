@@ -31,6 +31,27 @@ def test_memory_curator_writes_history_through_mem0() -> None:
     assert fake.calls[0]["messages"][0]["content"] == "以后默认中文和我说话"
 
 
+def test_memory_curator_falls_back_when_mem0_returns_no_results() -> None:
+    fake = EmptyMem0()
+    store = MemoryStore(
+        base_dir=_runtime_root("memory_curator_fallback"),
+        scope_id="sakura",
+        memory_client=fake,
+    )
+    api_client = FakeFallbackApiClient()
+    curator = MemoryCurator(api_client, store)
+
+    result = curator.curate_entries([_entry("user", "明天我妈妈生日")])
+
+    assert result.created == 1
+    assert result.returned == 1
+    assert result.event_counts == {"FALLBACK_ADD": 1}
+    assert fake.calls[0]["infer"] is True
+    assert fake.calls[1]["infer"] is False
+    assert fake.calls[1]["messages"] == "用户妈妈的生日是6月4日。"
+    assert fake.calls[1]["metadata"] == {"source": "curation_fallback"}
+
+
 def test_memory_curator_ignores_non_dialog_entries() -> None:
     fake = FakeMem0()
     store = MemoryStore(
@@ -84,7 +105,10 @@ def test_memory_entries_ignore_tone_and_portrait_metadata() -> None:
     ]
 
 
-def test_mem0_openai_llm_retries_empty_structured_response() -> None:
+def test_mem0_openai_llm_retries_empty_structured_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+
     from mem0.llms.openai import OpenAILLM
 
     llm = OpenAILLM({"api_key": "test-key", "model": "test-model"})
@@ -154,6 +178,49 @@ class FakeMem0:
                 }
             ]
         }
+
+
+class EmptyMem0:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def add(self, messages, *, user_id=None, infer=True, metadata=None):  # type: ignore[no-untyped-def]
+        self.calls.append(
+            {
+                "messages": messages,
+                "user_id": user_id,
+                "infer": infer,
+                "metadata": metadata,
+            }
+        )
+        if infer:
+            return {"results": []}
+        return {
+            "results": [
+                {
+                    "id": "fallback-1",
+                    "memory": messages,
+                    "user_id": user_id,
+                    "event": "ADD",
+                }
+            ]
+        }
+
+
+class FakeFallbackApiClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def complete_raw(self, system_prompt, messages, temperature=0.8, **chat_params):  # type: ignore[no-untyped-def]
+        self.calls.append(
+            {
+                "system_prompt": system_prompt,
+                "messages": messages,
+                "temperature": temperature,
+                "chat_params": chat_params,
+            }
+        )
+        return '{"memories":["用户妈妈的生日是6月4日。"]}'
 
 
 class FakeOpenAIClient:
