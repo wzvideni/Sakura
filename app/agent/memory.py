@@ -586,7 +586,8 @@ def _embedding_model_cache_candidates(base_dir: Path | None = None) -> list[Path
         runtime_cache = Path(base_dir) / "runtime" / "hf-cache"
         add_candidate(runtime_cache)
         add_candidate(runtime_cache / "hub")
-    default_hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    hf_home = (os.environ.get("HF_HOME") or "").strip()
+    default_hf_home = Path(hf_home) if hf_home else Path.home() / ".cache" / "huggingface"
     add_candidate(default_hf_home / "hub")
     return cache_candidates
 
