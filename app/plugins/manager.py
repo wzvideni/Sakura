@@ -354,6 +354,8 @@ def _validate_tool_contributions(
 ) -> None:
     local_tool_names: set[str] = set()
     for contribution in tools:
+        if not callable(contribution.handler):
+            raise ValueError(f"插件工具缺少处理器：{contribution.name}")
         if not OPENAI_TOOL_NAME_RE.fullmatch(contribution.name):
             raise ValueError(f"插件工具名无效：{contribution.name}")
         if contribution.name in known_tool_names or contribution.name in local_tool_names:
