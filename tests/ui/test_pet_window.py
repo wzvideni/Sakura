@@ -68,11 +68,15 @@ def test_pet_window_menu_keeps_only_allowed_checkable_switches() -> None:
     host.subtitle_language = SUBTITLE_LANGUAGE_ZH
     host.free_access_enabled = True
     host.always_on_top_enabled = False
+    host._hide_to_tray = lambda: None
+    host._show_from_tray = lambda: None
     host._toggle_chinese_subtitles = lambda _checked: None
     host._toggle_free_access = lambda _checked: None
     host._toggle_always_on_top = lambda _checked: None
     host.show_history = lambda: None
     host.show_settings = lambda: None
+    host.show()
+    app.processEvents()
 
     menu = PetWindow._build_menu(host)  # type: ignore[arg-type]
     actions = [action for action in menu.actions() if not action.isSeparator()]
@@ -91,6 +95,145 @@ def test_pet_window_menu_keeps_only_allowed_checkable_switches() -> None:
     menu.deleteLater()
     host.deleteLater()
     app.processEvents()
+
+
+def test_pet_window_menu_shows_restore_action_when_hidden() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication") or not hasattr(qtwidgets, "QWidget"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.pet_window import PetWindow, SUBTITLE_LANGUAGE_ZH
+
+    QApplication = qtwidgets.QApplication
+    QWidget = qtwidgets.QWidget
+    app = QApplication.instance() or QApplication([])
+    host = QWidget()
+    host.subtitle_language = SUBTITLE_LANGUAGE_ZH
+    host.free_access_enabled = True
+    host.always_on_top_enabled = False
+    host._hide_to_tray = lambda: None
+    host._show_from_tray = lambda: None
+    host._toggle_chinese_subtitles = lambda _checked: None
+    host._toggle_free_access = lambda _checked: None
+    host._toggle_always_on_top = lambda _checked: None
+    host.show_history = lambda: None
+    host.show_settings = lambda: None
+
+    menu = PetWindow._build_menu(host)  # type: ignore[arg-type]
+    actions = [action for action in menu.actions() if not action.isSeparator()]
+
+    assert actions[0].text() == "显示桌宠"
+
+    menu.deleteLater()
+    host.deleteLater()
+    app.processEvents()
+
+
+def test_pet_window_status_tray_icon_is_not_empty() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.pet_window import _build_status_tray_icon
+
+    QApplication = qtwidgets.QApplication
+    app = QApplication.instance() or QApplication([])
+
+    icon = _build_status_tray_icon("#d55b91")
+
+    assert not icon.isNull()
+    app.processEvents()
+
+
+def test_pet_window_hide_and_show_to_tray_tracks_hidden_state() -> None:
+    from app.ui.pet_window import PetWindow
+
+    class MinimalWindow:
+        _hide_to_tray = PetWindow._hide_to_tray
+        _show_from_tray = PetWindow._show_from_tray
+
+        def __init__(self) -> None:
+            self.hidden_to_tray = False
+            self.events: list[str] = []
+
+        def hide(self) -> None:
+            self.events.append("hide")
+
+        def show(self) -> None:
+            self.events.append("show")
+
+        def raise_(self) -> None:
+            self.events.append("raise")
+
+        def activateWindow(self) -> None:
+            self.events.append("activate")
+
+        def _refresh_tray_menu(self) -> None:
+            self.events.append("refresh")
+
+    window = MinimalWindow()
+
+    window._hide_to_tray()
+    assert window.hidden_to_tray is True
+    assert window.events == ["hide", "refresh"]
+
+    window._show_from_tray()
+    assert window.hidden_to_tray is False
+    assert window.events == ["hide", "refresh", "show", "raise", "activate", "refresh"]
+
+
+def test_pet_window_application_activation_restores_when_hidden_to_tray(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        pet_window_module.QTimer,
+        "singleShot",
+        lambda delay, callback: events.append(f"timer:{delay}") or callback(),
+    )
+
+    class MinimalWindow:
+        _handle_application_activated = PetWindow._handle_application_activated
+
+        def __init__(self) -> None:
+            self.hidden_to_tray = True
+
+        def _show_from_tray(self) -> None:
+            self.hidden_to_tray = False
+            events.append("show")
+
+    window = MinimalWindow()
+
+    window._handle_application_activated()
+
+    assert window.hidden_to_tray is False
+    assert events == ["timer:0", "show"]
+
+
+def test_pet_window_application_activation_ignores_visible_window(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        pet_window_module.QTimer,
+        "singleShot",
+        lambda _delay, _callback: events.append("timer"),
+    )
+
+    class MinimalWindow:
+        _handle_application_activated = PetWindow._handle_application_activated
+        hidden_to_tray = False
+
+        def _show_from_tray(self) -> None:
+            events.append("show")
+
+    MinimalWindow()._handle_application_activated()
+
+    assert events == []
 
 
 def test_pet_window_context_menu_opens_on_right_release_not_press() -> None:
@@ -3704,7 +3847,7 @@ def test_pet_window_apply_window_flags_syncs_native_topmost_state() -> None:
         def show(self) -> None:
             self.show_count += 1
 
-        def _sync_native_topmost_state(self) -> None:
+        def _schedule_native_topmost_sync(self) -> None:
             self.sync_count += 1
 
     window = MinimalWindow()
@@ -3738,7 +3881,7 @@ def test_pet_window_apply_window_flags_does_not_sync_native_state_before_visible
         def show(self) -> None:
             self.show_count += 1
 
-        def _sync_native_topmost_state(self) -> None:
+        def _schedule_native_topmost_sync(self) -> None:
             self.sync_count += 1
 
     window = MinimalWindow()
@@ -3747,6 +3890,29 @@ def test_pet_window_apply_window_flags_does_not_sync_native_state_before_visible
 
     assert window.show_count == 0
     assert window.sync_count == 0
+
+
+def test_pet_window_schedules_native_topmost_sync_on_macos(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    events: list[str] = []
+    monkeypatch.setattr(pet_window_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        pet_window_module.QTimer,
+        "singleShot",
+        lambda _delay, callback: events.append("timer") or callback(),
+    )
+
+    class MinimalWindow:
+        _schedule_native_topmost_sync = PetWindow._schedule_native_topmost_sync
+
+        def _sync_native_topmost_state(self) -> None:
+            events.append("sync")
+
+    MinimalWindow()._schedule_native_topmost_sync()
+
+    assert events == ["timer", "sync"]
 
 
 def test_pet_window_context_menu_resyncs_topmost_after_menu_closes() -> None:
@@ -3776,6 +3942,62 @@ def test_pet_window_context_menu_resyncs_topmost_after_menu_closes() -> None:
     window._show_context_menu(object())  # type: ignore[arg-type]
 
     assert window.events == ["exec", "sync"]
+
+
+def test_pet_window_syncs_macos_native_topmost_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(pet_window_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        pet_window_module,
+        "_set_macos_window_topmost",
+        lambda window_id, enabled: calls.append((window_id, enabled)),
+    )
+
+    class MinimalWindow:
+        _sync_native_topmost_state = PetWindow._sync_native_topmost_state
+
+        always_on_top_enabled = True
+
+        def isVisible(self) -> bool:
+            return True
+
+        def winId(self) -> int:
+            return 123
+
+    MinimalWindow()._sync_native_topmost_state()
+
+    assert calls == [(123, True)]
+
+
+def test_pet_window_skips_macos_native_topmost_sync_when_hidden(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(pet_window_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        pet_window_module,
+        "_set_macos_window_topmost",
+        lambda window_id, enabled: calls.append((window_id, enabled)),
+    )
+
+    class MinimalWindow:
+        _sync_native_topmost_state = PetWindow._sync_native_topmost_state
+
+        always_on_top_enabled = True
+
+        def isVisible(self) -> bool:
+            return False
+
+        def winId(self) -> int:
+            return 123
+
+    MinimalWindow()._sync_native_topmost_state()
+
+    assert calls == []
 
 
 def test_screen_observation_followup_uses_last_user_message_after_progress(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -18,11 +18,13 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import (
+    QColor,
     QCursor,
     QFont,
     QIcon,
     QKeyEvent,
     QMouseEvent,
+    QPainter,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -218,6 +220,7 @@ class PetWindow(QWidget):
         self.pending_screen_observation_event_reminder_id: str | None = None
         self.pending_visual_observation_jobs: list[VisualObservationJob] = []
         self.pending_event_visual_observation_jobs: list[VisualObservationJob] = []
+        self.hidden_to_tray = False
         self.screen_observation_followup_in_progress = False
         self.active_reminder_id: str | None = None
         self.active_reminder_text = ""
@@ -466,12 +469,36 @@ class PetWindow(QWidget):
         application = QApplication.instance()
         if application is not None:
             application.aboutToQuit.connect(self.close_external_tools)
+            if sys.platform == "darwin":
+                application.installEventFilter(self)
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
         self._layout_stage()
 
+    def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().showEvent(event)
+        self._refresh_tray_menu()
+        self._schedule_native_topmost_sync()
+
+    def hideEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().hideEvent(event)
+        self._refresh_tray_menu()
+
+    def changeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.ActivationChange,
+            QEvent.Type.WindowStateChange,
+        }:
+            self._schedule_native_topmost_sync()
+
     def eventFilter(self, watched, event) -> bool:  # type: ignore[no-untyped-def]
+        application = QApplication.instance()
+        if application is not None and watched is application:
+            if event.type() == QEvent.Type.ApplicationActivate:
+                self._handle_application_activated()
+            return super().eventFilter(watched, event)
         if watched is self.input_edit:
             if event.type() == QEvent.Type.KeyPress:
                 self._log_input_key_event(event)
@@ -484,7 +511,13 @@ class PetWindow(QWidget):
                 self._clear_manual_screen_observation()
                 return True
             return super().eventFilter(watched, event)
-        if isinstance(event, QMouseEvent):
+        if watched in {
+            self.label,
+            self.portrait_transition_label,
+            self.bubble,
+            self.name_label,
+            self.speech_label,
+        } and isinstance(event, QMouseEvent):
             if event.type() == QEvent.Type.MouseButtonPress:
                 return self._handle_mouse_press(event)
             if event.type() == QEvent.Type.MouseMove:
@@ -712,8 +745,9 @@ class PetWindow(QWidget):
         self.input_bar.raise_()
 
     def _update_tray_icon_pixmap(self, pixmap: QPixmap) -> None:
+        _ = pixmap
         if hasattr(self, "tray_icon"):
-            self.tray_icon.setIcon(QIcon(pixmap) if not pixmap.isNull() else QIcon())
+            self.tray_icon.setIcon(_build_status_tray_icon(self.theme_settings.primary_color))
 
     def _apply_fonts(self) -> None:
         text_font = _rounded_chinese_font(13, QFont.Weight.Bold)
@@ -767,8 +801,7 @@ class PetWindow(QWidget):
         self.input_backdrop.update()
 
     def _create_tray_icon(self) -> None:
-        pixmap = self.portrait_controller.pixmap
-        icon = QIcon(pixmap) if not pixmap.isNull() else QIcon()
+        icon = _build_status_tray_icon(self.theme_settings.primary_color)
         self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip(self.character_profile.display_name)
         self.tray_icon.setContextMenu(self._build_menu())
@@ -782,13 +815,22 @@ class PetWindow(QWidget):
             free_access_checked=self.free_access_enabled,
             always_on_top_checked=self.always_on_top_enabled,
             interactions_enabled=not getattr(self, "startup_initializing", False),
-            on_hide=self.hide,
+            window_visible=self.isVisible(),
+            on_hide=self._hide_to_tray,
+            on_show=self._show_from_tray,
             on_toggle_chinese_subtitles=self._toggle_chinese_subtitles,
             on_toggle_free_access=self._toggle_free_access,
             on_toggle_always_on_top=self._toggle_always_on_top,
             on_show_history=self.show_history,
             on_show_settings=self.show_settings,
         )
+
+    def _refresh_tray_menu(self) -> None:
+        if hasattr(self, "tray_icon"):
+            old_menu = self.tray_icon.contextMenu()
+            self.tray_icon.setContextMenu(self._build_menu())
+            if old_menu is not None:
+                old_menu.deleteLater()
 
     def _show_context_menu(self, position: QPoint) -> None:
         _ = position
@@ -2175,10 +2217,27 @@ class PetWindow(QWidget):
 
     def toggle_visible(self) -> None:
         if self.isVisible():
-            self.hide()
+            self._hide_to_tray()
         else:
-            self.show()
-            self.raise_()
+            self._show_from_tray()
+
+    @Slot()
+    def _hide_to_tray(self) -> None:
+        self.hidden_to_tray = True
+        self.hide()
+        self._refresh_tray_menu()
+
+    @Slot()
+    def _show_from_tray(self) -> None:
+        self.hidden_to_tray = False
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._refresh_tray_menu()
+
+    def _handle_application_activated(self) -> None:
+        if getattr(self, "hidden_to_tray", False):
+            QTimer.singleShot(0, self._show_from_tray)
 
     @Slot()
     def show_history(self) -> None:
@@ -2669,25 +2728,37 @@ class PetWindow(QWidget):
         self.setWindowFlags(self._window_flags())
         if was_visible:
             self.show()
-            self._sync_native_topmost_state()
+            self._schedule_native_topmost_sync()
+
+    def _schedule_native_topmost_sync(self) -> None:
+        if sys.platform not in {"win32", "darwin"}:
+            return
+        QTimer.singleShot(0, self._sync_native_topmost_state)
 
     def _sync_native_topmost_state(self) -> None:
-        if sys.platform != "win32" or not self.isVisible():
+        if not self.isVisible():
             return
-        try:
-            import ctypes
+        if sys.platform == "win32":
+            try:
+                import ctypes
 
-            hwnd = int(self.winId())
-            hwnd_topmost = -1
-            hwnd_notopmost = -2
-            swp_no_size = 0x0001
-            swp_no_move = 0x0002
-            swp_no_activate = 0x0010
-            insert_after = hwnd_topmost if self.always_on_top_enabled else hwnd_notopmost
-            flags = swp_no_size | swp_no_move | swp_no_activate
-            ctypes.windll.user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
-        except Exception as exc:  # noqa: BLE001
-            debug_log("PetWindow", "同步原生置顶状态失败", {"error": str(exc)})
+                hwnd = int(self.winId())
+                hwnd_topmost = -1
+                hwnd_notopmost = -2
+                swp_no_size = 0x0001
+                swp_no_move = 0x0002
+                swp_no_activate = 0x0010
+                insert_after = hwnd_topmost if self.always_on_top_enabled else hwnd_notopmost
+                flags = swp_no_size | swp_no_move | swp_no_activate
+                ctypes.windll.user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags)
+            except Exception as exc:  # noqa: BLE001
+                debug_log("PetWindow", "同步原生置顶状态失败", {"error": str(exc)})
+            return
+        if sys.platform == "darwin":
+            try:
+                _set_macos_window_topmost(int(self.winId()), self.always_on_top_enabled)
+            except Exception as exc:  # noqa: BLE001
+                debug_log("PetWindow", "同步 macOS 原生置顶状态失败", {"error": str(exc)})
 
     def _apply_portrait_scale_percent(self, portrait_scale_percent: int) -> None:
         self.portrait_scale_percent = normalize_portrait_scale_percent(portrait_scale_percent)
@@ -2721,6 +2792,8 @@ class PetWindow(QWidget):
         self.setStyleSheet(pet_window_stylesheet(self.theme_settings))
         if self.history_window is not None:
             self.history_window.set_theme_settings(self.theme_settings)
+        if hasattr(self, "tray_icon"):
+            self.tray_icon.setIcon(_build_status_tray_icon(self.theme_settings.primary_color))
 
     def _apply_character(self, profile: CharacterProfile) -> None:
         previous_character_id = self.character_profile.id
@@ -2731,10 +2804,10 @@ class PetWindow(QWidget):
         self.setWindowTitle(profile.display_name)
         self.name_label.setText(profile.display_name)
         self.input_edit.setPlaceholderText(f"和{profile.display_name}说点什么...")
-        portrait_pixmap = self.portrait_controller.set_profile(profile)
+        self.portrait_controller.set_profile(profile)
         if hasattr(self, "tray_icon"):
             self.tray_icon.setToolTip(profile.display_name)
-            self.tray_icon.setIcon(QIcon(portrait_pixmap) if not portrait_pixmap.isNull() else QIcon())
+            self.tray_icon.setIcon(_build_status_tray_icon(self.theme_settings.primary_color))
 
         self.history_store = self._create_history_store(profile)
         self.visual_observation_store = self._create_visual_observation_store(profile)
@@ -3025,3 +3098,99 @@ def _configure_reply_history_button(button: QToolButton, *, text: str, tooltip: 
     button.setText(text)
     button.setFixedSize(REPLY_HISTORY_BUTTON_SIZE, REPLY_HISTORY_BUTTON_SIZE)
     button.setToolTip(tooltip)
+
+
+def _build_status_tray_icon(color_text: str) -> QIcon:
+    color = QColor(color_text)
+    if not color.isValid():
+        color = QColor(DEFAULT_THEME_SETTINGS.primary_color)
+
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(color)
+    painter.drawEllipse(3, 3, 26, 26)
+    painter.setPen(QColor("#ffffff"))
+    painter.setFont(_rounded_chinese_font(18, QFont.Weight.ExtraBold))
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "S")
+    painter.end()
+
+    return QIcon(pixmap)
+
+
+def _set_macos_window_topmost(window_id: int, enabled: bool) -> None:
+    """同步 macOS NSWindow 层级，确保置顶窗口能跟随当前 Space。"""
+
+    import ctypes
+    import ctypes.util
+
+    objc = ctypes.CDLL(ctypes.util.find_library("objc") or "/usr/lib/libobjc.A.dylib")
+    sel_register_name = objc.sel_registerName
+    sel_register_name.argtypes = [ctypes.c_char_p]
+    sel_register_name.restype = ctypes.c_void_p
+
+    def selector(name: bytes) -> int:
+        return int(sel_register_name(name))
+
+    def message(restype: object, *argtypes: object) -> object:
+        return ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes)(
+            ("objc_msgSend", objc)
+        )
+
+    send_bool = message(ctypes.c_bool, ctypes.c_void_p)
+    send_ptr = message(ctypes.c_void_p)
+    send_level = message(None, ctypes.c_long)
+    send_hides_on_deactivate = message(None, ctypes.c_bool)
+    send_ulong = message(ctypes.c_ulong)
+    send_collection = message(None, ctypes.c_ulong)
+
+    obj = ctypes.c_void_p(window_id)
+    sel_window = selector(b"window")
+    sel_responds_to_selector = selector(b"respondsToSelector:")
+    if send_bool(obj, ctypes.c_void_p(sel_responds_to_selector), ctypes.c_void_p(sel_window)):
+        ns_window = send_ptr(obj, ctypes.c_void_p(sel_window))
+        if not ns_window:
+            return
+    else:
+        ns_window = window_id
+
+    ns_window_ptr = ctypes.c_void_p(int(ns_window))
+    ns_window_collection_behavior_can_join_all_spaces = 1 << 0
+    ns_window_collection_behavior_move_to_active_space = 1 << 1
+    ns_window_collection_behavior_full_screen_auxiliary = 1 << 8
+    ns_floating_window_level = 3
+    ns_modal_panel_window_level = 8
+
+    level = ns_modal_panel_window_level if enabled else ns_floating_window_level
+    send_level(ns_window_ptr, ctypes.c_void_p(selector(b"setLevel:")), level)
+
+    sel_set_hides_on_deactivate = selector(b"setHidesOnDeactivate:")
+    if send_bool(
+        ns_window_ptr,
+        ctypes.c_void_p(sel_responds_to_selector),
+        ctypes.c_void_p(sel_set_hides_on_deactivate),
+    ):
+        send_hides_on_deactivate(
+            ns_window_ptr,
+            ctypes.c_void_p(sel_set_hides_on_deactivate),
+            not enabled,
+        )
+
+    collection_behavior = int(send_ulong(ns_window_ptr, ctypes.c_void_p(selector(b"collectionBehavior"))))
+    if enabled:
+        collection_behavior |= (
+            ns_window_collection_behavior_can_join_all_spaces
+            | ns_window_collection_behavior_full_screen_auxiliary
+        )
+        collection_behavior &= ~ns_window_collection_behavior_move_to_active_space
+    else:
+        collection_behavior &= ~ns_window_collection_behavior_can_join_all_spaces
+        collection_behavior |= ns_window_collection_behavior_move_to_active_space
+    send_collection(
+        ns_window_ptr,
+        ctypes.c_void_p(selector(b"setCollectionBehavior:")),
+        collection_behavior,
+    )
