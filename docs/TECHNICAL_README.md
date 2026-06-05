@@ -140,7 +140,7 @@ flowchart LR
 
 ## 运行与测试
 
-项目使用根目录下 `runtime/python.exe` 的运行环境。
+项目在 Release 完整包（或从 Release 下载 `runtime-*.zip` 后解压到根目录）时，根目录会包含 `runtime/`，Windows 可用 `./runtime/python.exe` 运行；从源码开发时也可以使用任意 Python 3.10+ 虚拟环境。
 
 启动应用：
 
