@@ -116,7 +116,7 @@ from sdk.types import SettingsPanelContribution, ToolsTabContribution
 
 
 MEMORY_READING_TEXT = "正在读取长期记忆..."
-MEMORY_DEPENDENCY_LOADING_TEXT = "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。"
+MEMORY_DEPENDENCY_LOADING_TEXT = "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。"
 
 
 class ApiConnectionTestWorker(QObject):
@@ -315,6 +315,8 @@ class CharacterArchiveExportWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
+            if self.export_kind in ("full", "voice") and not _has_exportable_voice_model(self.profile):
+                raise CharacterArchiveError("当前角色没有完整语音模型，请导出单角色包。")
             if self.export_kind == "voice":
                 export_character_voice_archive(self.profile, self.output_path)
             else:
@@ -329,6 +331,19 @@ class CharacterArchiveExportWorker(QObject):
             self.succeeded.emit(str(self.output_path))
         finally:
             self.finished.emit()
+
+
+def _has_exportable_voice_model(profile: CharacterProfile | None) -> bool:
+    """判断角色是否带有可随包导出的完整语音模型。"""
+
+    if profile is None or profile.voice is None:
+        return False
+    return (
+        profile.voice.gpt_model_path is not None
+        and profile.voice.gpt_model_path.is_file()
+        and profile.voice.sovits_model_path is not None
+        and profile.voice.sovits_model_path.is_file()
+    )
 
 
 class SettingsDialog(QDialog):
@@ -2415,8 +2430,15 @@ class SettingsDialog(QDialog):
         if profile is None:
             QMessageBox.warning(self, "导出失败", "当前没有可导出的角色。")
             return
-        if export_kind == "voice" and profile.voice is None:
-            QMessageBox.warning(self, "导出失败", "当前角色没有可导出的语音包。")
+        if export_kind in ("full", "voice") and not _has_exportable_voice_model(profile):
+            if export_kind == "full":
+                QMessageBox.warning(
+                    self,
+                    "导出失败",
+                    "当前角色没有完整语音模型，请使用“导出单角色包 (.char)”导出角色人格和立绘。",
+                )
+            else:
+                QMessageBox.warning(self, "导出失败", "当前角色没有可导出的语音模型。")
             return
         if export_kind == "voice":
             title = "导出 Sakura TTS 模型包"
@@ -2515,14 +2537,22 @@ class SettingsDialog(QDialog):
         if busy is None:
             busy = self._character_export_thread is not None
         has_profile = profile is not None
-        has_voice = has_profile and profile.voice is not None
-        for action in (self.character_export_full_action, self.character_export_card_action):
-            action.setEnabled(not busy and has_profile)
-        self.character_export_voice_action.setEnabled(not busy and has_voice)
-        if has_voice:
+        has_voice_model = _has_exportable_voice_model(profile)
+        self.character_export_full_action.setEnabled(not busy and has_voice_model)
+        self.character_export_card_action.setEnabled(not busy and has_profile)
+        self.character_export_voice_action.setEnabled(not busy and has_voice_model)
+        if not has_profile:
+            self.character_export_full_action.setToolTip("当前没有可导出的角色。")
+            self.character_export_card_action.setToolTip("当前没有可导出的角色。")
+            self.character_export_voice_action.setToolTip("当前没有可导出的角色。")
+        elif has_voice_model:
+            self.character_export_full_action.setToolTip("导出当前角色的人格、立绘与语音模型。")
+            self.character_export_card_action.setToolTip("导出当前角色的人格与立绘，不包含语音模型。")
             self.character_export_voice_action.setToolTip("导出当前角色的 .voice TTS 模型包。")
         else:
-            self.character_export_voice_action.setToolTip("当前角色没有可导出的语音包。")
+            self.character_export_full_action.setToolTip("当前角色没有完整语音模型，只能导出单角色包。")
+            self.character_export_card_action.setToolTip("导出当前角色的人格与立绘，不包含语音模型。")
+            self.character_export_voice_action.setToolTip("当前角色没有可导出的语音模型。")
 
     def _validated_api_settings(self) -> ApiSettings | None:
         base_url = self.base_url_edit.text().strip().rstrip("/")

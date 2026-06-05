@@ -182,20 +182,28 @@ def test_memory_status_does_not_use_tray_balloon(monkeypatch) -> None:  # type: 
             self.messages.append(message)
 
     single_shots: list[tuple[int, object]] = []
+    warnings: list[tuple[str, str]] = []
     monkeypatch.setattr(
         pet_window_module.QTimer,
         "singleShot",
         lambda delay, callback: single_shots.append((delay, callback)),
     )
+    monkeypatch.setattr(
+        pet_window_module,
+        "show_themed_warning",
+        lambda _parent, title, text, **_kwargs: warnings.append((title, text)),
+    )
     window = type("WindowStub", (), {})()
     window.memory_status_message_active = False
     window.memory_status_last_message = ""
+    window.memory_failure_dialog_last_message = ""
     window.startup_initializing = False
     window.active_interaction_id = None
     window.reply_history_review_active = False
     window.subtitle_controller = SubtitleControllerStub()
     window.tray_icon = TrayIconStub()
     window._restore_memory_status_speech = lambda: None
+    window._show_memory_failure_dialog = lambda message: PetWindow._show_memory_failure_dialog(window, message)
 
     for status in ("loading", "reloading", "failed"):
         PetWindow._show_memory_status_message(window, status, f"{status} message")
@@ -207,6 +215,7 @@ def test_memory_status_does_not_use_tray_balloon(monkeypatch) -> None:  # type: 
         "reloading message",
         "failed message",
     ]
+    assert warnings == [("记忆模型下载失败", "failed message")]
     assert single_shots == [(pet_window_module.MEMORY_STATUS_DISPLAY_MS, window._restore_memory_status_speech)]
 
 
@@ -2259,6 +2268,7 @@ def test_settings_dialog_export_button_uses_menu_actions(monkeypatch) -> None:  
     root = case_root / "runtime"
     profile = _build_settings_dialog_character(root, "sakura", "Sakura")
     _build_settings_dialog_character(root, "nanami", "Nanami", with_voice=False)
+    _build_settings_dialog_character(root, "yuki", "Yuki", with_voice_models=False)
 
     QApplication = qtwidgets.QApplication
     app = QApplication.instance() or QApplication([])
@@ -2290,6 +2300,8 @@ def test_settings_dialog_export_button_uses_menu_actions(monkeypatch) -> None:  
         "导出单角色包 (.char)",
         "导出语音包 (.voice)",
     ]
+    assert dialog.character_export_full_action.isEnabled()
+    assert dialog.character_export_card_action.isEnabled()
     assert dialog.character_export_voice_action.isEnabled()
 
     dialog.character_export_full_action.trigger()
@@ -2305,8 +2317,20 @@ def test_settings_dialog_export_button_uses_menu_actions(monkeypatch) -> None:  
     nanami_index = dialog.character_combo.findData("nanami")
     assert nanami_index >= 0
     dialog.character_combo.setCurrentIndex(nanami_index)
+    assert not dialog.character_export_full_action.isEnabled()
+    assert dialog.character_export_card_action.isEnabled()
     assert not dialog.character_export_voice_action.isEnabled()
-    assert "没有可导出的语音包" in dialog.character_export_voice_action.toolTip()
+    assert "没有完整语音模型" in dialog.character_export_full_action.toolTip()
+    assert "没有可导出的语音模型" in dialog.character_export_voice_action.toolTip()
+
+    yuki_index = dialog.character_combo.findData("yuki")
+    assert yuki_index >= 0
+    dialog.character_combo.setCurrentIndex(yuki_index)
+    assert not dialog.character_export_full_action.isEnabled()
+    assert dialog.character_export_card_action.isEnabled()
+    assert not dialog.character_export_voice_action.isEnabled()
+    assert "没有完整语音模型" in dialog.character_export_full_action.toolTip()
+    assert "没有可导出的语音模型" in dialog.character_export_voice_action.toolTip()
 
     dialog.deleteLater()
     app.processEvents()
@@ -2540,7 +2564,7 @@ def test_settings_dialog_shows_memory_dependency_download_hint() -> None:
         memory_store=memory_store,  # type: ignore[arg-type]
     )
 
-    expected = "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。"
+    expected = "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。"
     assert dialog.memory_status_label.text() == expected
     assert dialog.memory_table.item(0, 1).text() == expected
     assert _process_events_until(app, lambda: memory_store.list_calls == 1)
@@ -3253,6 +3277,178 @@ def test_history_clear_keeps_history_when_memory_curation_returns_nothing(monkey
     assert window.history_store.clear_calls == 0
     assert window.memory_curation_state.cleared is False
     assert warnings == [("整理失败", "记忆整理没有写入任何结果，已保留聊天历史。请检查日志后再重试。")]
+
+
+def test_history_clear_queues_while_auto_memory_curation_is_running(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    messages: list[tuple[str, str]] = []
+
+    class HistoryWindowStub:
+        def __init__(self) -> None:
+            self.busy_calls: list[bool] = []
+
+        def set_memory_save_busy(self, busy: bool) -> None:
+            self.busy_calls.append(busy)
+
+    class WindowStub:
+        _save_history_to_memory_and_clear = PetWindow._save_history_to_memory_and_clear
+
+        def __init__(self) -> None:
+            self.memory_curation_thread = object()
+            self.memory_curation_mode = "backfill"
+            self.pending_history_clear_after_curation = False
+            self.history_window = HistoryWindowStub()
+            self.worker_thread = None
+
+    monkeypatch.setattr(
+        pet_window_module,
+        "show_themed_information",
+        lambda _parent, title, text, **_kwargs: messages.append((title, text)),
+    )
+
+    window = WindowStub()
+    window._save_history_to_memory_and_clear()
+
+    assert window.pending_history_clear_after_curation is True
+    assert window.history_window.busy_calls == []
+    assert messages == [("整理中", "当前正在自动整理记忆，结束后会继续清空并保存历史。")]
+
+
+def test_queued_history_clear_starts_after_auto_curation_cleanup(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    timer_calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(
+        pet_window_module.QTimer,
+        "singleShot",
+        lambda delay, callback: timer_calls.append((delay, callback)),
+    )
+
+    class DisposableStub:
+        def deleteLater(self) -> None:
+            pass
+
+    class HistoryStoreStub:
+        def load(self) -> list[object]:
+            return [object()]
+
+    class MemoryStoreStub:
+        def is_ready(self) -> bool:
+            return True
+
+    class MemoryCurationStateStub:
+        def pending_turns(self) -> int:
+            return 2
+
+    class HistoryWindowStub:
+        def __init__(self) -> None:
+            self.busy_calls: list[bool] = []
+
+        def set_memory_save_busy(self, busy: bool) -> None:
+            self.busy_calls.append(busy)
+
+    class WindowStub:
+        _cleanup_memory_curation_worker = PetWindow._cleanup_memory_curation_worker
+        _start_pending_history_clear_after_curation = PetWindow._start_pending_history_clear_after_curation
+        _memory_store_ready_for_history_clear = PetWindow._memory_store_ready_for_history_clear
+
+        def __init__(self) -> None:
+            self.memory_curation_worker = DisposableStub()
+            self.memory_curation_thread = DisposableStub()
+            self.memory_curation_mode = "backfill"
+            self.memory_curation_target_history_count = 5
+            self.memory_curation_consumed_turns = 0
+            self.pending_history_clear_after_curation = True
+            self.history_window = HistoryWindowStub()
+            self.history_store = HistoryStoreStub()
+            self.memory_store = MemoryStoreStub()
+            self.memory_curation_state = MemoryCurationStateStub()
+            self.start_calls: list[dict[str, object]] = []
+
+        def _memory_curation_can_start(self) -> bool:
+            return True
+
+        def _start_memory_curation(self, entries, *, mode, target_history_count, consumed_turns):  # type: ignore[no-untyped-def]
+            self.start_calls.append(
+                {
+                    "entry_count": len(entries),
+                    "mode": mode,
+                    "target_history_count": target_history_count,
+                    "consumed_turns": consumed_turns,
+                }
+            )
+            self.memory_curation_thread = object()
+
+    window = WindowStub()
+    window._cleanup_memory_curation_worker()
+
+    assert window.pending_history_clear_after_curation is False
+    assert window.start_calls == [
+        {
+            "entry_count": 1,
+            "mode": "history_clear",
+            "target_history_count": 1,
+            "consumed_turns": 2,
+        }
+    ]
+    assert window.history_window.busy_calls == []
+    assert timer_calls == []
+
+
+def test_history_clear_reports_when_memory_store_is_not_ready(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    messages: list[tuple[str, str]] = []
+
+    class HistoryStoreStub:
+        def load(self) -> list[object]:
+            return [object()]
+
+    class MemoryStoreStub:
+        def is_ready(self) -> bool:
+            return False
+
+    class HistoryWindowStub:
+        def __init__(self) -> None:
+            self.busy_calls: list[bool] = []
+
+        def set_memory_save_busy(self, busy: bool) -> None:
+            self.busy_calls.append(busy)
+
+    class WindowStub:
+        _save_history_to_memory_and_clear = PetWindow._save_history_to_memory_and_clear
+        _memory_store_ready_for_history_clear = PetWindow._memory_store_ready_for_history_clear
+        _show_memory_not_ready_for_history_clear = PetWindow._show_memory_not_ready_for_history_clear
+
+        def __init__(self) -> None:
+            self.memory_curation_thread = None
+            self.memory_curation_mode = ""
+            self.worker_thread = None
+            self.history_store = HistoryStoreStub()
+            self.memory_store = MemoryStoreStub()
+            self.history_window = HistoryWindowStub()
+            self.memory_status_last_message = "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。"
+            self.start_calls = 0
+
+        def _start_memory_curation(self, *_args, **_kwargs) -> None:
+            self.start_calls += 1
+
+    monkeypatch.setattr(
+        pet_window_module,
+        "show_themed_information",
+        lambda _parent, title, text, **_kwargs: messages.append((title, text)),
+    )
+
+    window = WindowStub()
+    window._save_history_to_memory_and_clear()
+
+    assert window.start_calls == 0
+    assert window.history_window.busy_calls == [False]
+    assert messages == [("记忆初始化中", "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。")]
 
 
 def test_show_settings_reloads_memory_in_background_when_api_changes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -5480,6 +5676,7 @@ def _build_settings_dialog_character(
     theme: dict[str, object] | None = None,
     *,
     with_voice: bool = True,
+    with_voice_models: bool = True,
 ):
     from app.config.character_loader import CharacterRegistry
 
@@ -5499,20 +5696,26 @@ def _build_settings_dialog_character(
     if with_voice:
         (character_dir / "voice" / "models").mkdir(parents=True, exist_ok=True)
         (character_dir / "voice" / "refs" / "tone_refs").mkdir(parents=True, exist_ok=True)
-        (character_dir / "voice" / "models" / "gpt.ckpt").write_bytes(b"gpt")
-        (character_dir / "voice" / "models" / "sovits.pth").write_bytes(b"sovits")
         (character_dir / "voice" / "refs" / "tone_refs" / "neutral.wav").write_bytes(b"wav")
         (character_dir / "voice" / "refs" / "ref.txt").write_text(
             "voice/refs/tone_refs/neutral.wav|JA|テスト|中性\n",
             encoding="utf-8",
         )
-        character_data["voice"] = {
-            "gpt_model": "voice/models/gpt.ckpt",
-            "sovits_model": "voice/models/sovits.pth",
+        voice_data = {
             "tone_refs": "voice/refs/ref.txt",
             "ref_lang": "ja",
             "text_lang": "ja",
         }
+        if with_voice_models:
+            (character_dir / "voice" / "models" / "gpt.ckpt").write_bytes(b"gpt")
+            (character_dir / "voice" / "models" / "sovits.pth").write_bytes(b"sovits")
+            voice_data.update(
+                {
+                    "gpt_model": "voice/models/gpt.ckpt",
+                    "sovits_model": "voice/models/sovits.pth",
+                }
+            )
+        character_data["voice"] = voice_data
     if theme is not None:
         character_data["theme"] = theme
     (character_dir / "character.json").write_text(
@@ -5606,6 +5809,49 @@ def _minimal_tts_settings() -> GPTSoVITSTTSSettings:
         text_lang="ja",
         timeout_seconds=1,
     )
+
+
+def test_tts_ready_warmup_worker_calls_ensure_ready_success() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6.QtCore")
+    from app.ui.pet_window import TTSReadyWarmupWorker
+
+    events: list[tuple[str, str]] = []
+
+    class FakeProvider:
+        def ensure_ready(self) -> tuple[bool, str]:
+            events.append(("called", ""))
+            return True, "ready"
+
+    worker = TTSReadyWarmupWorker(FakeProvider())  # type: ignore[arg-type]
+    worker.succeeded.connect(lambda message: events.append(("succeeded", message)))
+    worker.failed.connect(lambda message: events.append(("failed", message)))
+    worker.finished.connect(lambda: events.append(("finished", "")))
+
+    worker.run()
+
+    assert events == [("called", ""), ("succeeded", "ready"), ("finished", "")]
+
+
+def test_tts_ready_warmup_worker_reports_failure() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6.QtCore")
+    from app.ui.pet_window import TTSReadyWarmupWorker
+
+    events: list[tuple[str, str]] = []
+
+    class FakeProvider:
+        def ensure_ready(self) -> tuple[bool, str]:
+            return False, "启动失败"
+
+    worker = TTSReadyWarmupWorker(FakeProvider())  # type: ignore[arg-type]
+    worker.succeeded.connect(lambda message: events.append(("succeeded", message)))
+    worker.failed.connect(lambda message: events.append(("failed", message)))
+    worker.finished.connect(lambda: events.append(("finished", "")))
+
+    worker.run()
+
+    assert events == [("failed", "启动失败"), ("finished", "")]
 
 
 def test_tts_test_worker_keeps_provider_after_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]

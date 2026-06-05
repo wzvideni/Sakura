@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,16 @@ from app.config.defaults import (
 )
 from app.config.migrations import _parse_dotenv, _coerce_type, migrate_env_to_yaml
 from app.config.models import ApiSettings, DebugLogSettings
+
+
+_TEST_TEMP_ROOT = Path(__file__).resolve().parents[2] / "temp" / "test_config"
+
+
+def _make_test_dir(name: str) -> Path:
+    """创建继承仓库 ACL 的唯一测试目录，避免 tempfile 在 Windows 沙箱中丢权限。"""
+    path = _TEST_TEMP_ROOT / f"{name}_{uuid.uuid4().hex}"
+    path.mkdir(parents=True)
+    return path
 
 
 class TestApiSettings:
@@ -106,8 +118,8 @@ class TestMigration:
     """.env → YAML 迁移"""
 
     def test_migrate_basic(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
+        base = _make_test_dir("migrate_basic")
+        try:
             config_dir = base / "data" / "config"
             config_dir.mkdir(parents=True)
 
@@ -124,10 +136,12 @@ class TestMigration:
             result = migrate_env_to_yaml(env_path, api_yaml, system_yaml)
             assert "BASE_URL" in result["migrated"]
             assert "API_KEY" in result["migrated"]
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
 
     def test_migrate_missing_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            base = Path(tmpdir)
+        base = _make_test_dir("migrate_missing_env")
+        try:
             config_dir = base / "data" / "config"
             config_dir.mkdir(parents=True)
             api_yaml = config_dir / "api.yaml"
@@ -136,3 +150,5 @@ class TestMigration:
             system_yaml.write_text("{}\n")
             result = migrate_env_to_yaml(base / "missing.env", api_yaml, system_yaml)
             assert result["errors"]
+        finally:
+            shutil.rmtree(base, ignore_errors=True)

@@ -238,6 +238,51 @@ def show_themed_critical(
     )
 
 
+class TTSReadyWarmupWorker(QObject):
+    """后台启动并检测 TTS 服务，避免首次朗读承担冷启动。"""
+
+    succeeded = Signal(str)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, provider: TTSProvider) -> None:
+        super().__init__()
+        self.provider = provider
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            ensure_ready = getattr(self.provider, "ensure_ready", None)
+            if not callable(ensure_ready):
+                return
+            debug_log("TTS", "开始后台预热 TTS 服务", {"provider": type(self.provider).__name__})
+            ok, message = ensure_ready()
+            if ok:
+                debug_log(
+                    "TTS",
+                    "后台预热 TTS 服务完成",
+                    {"provider": type(self.provider).__name__, "message": message},
+                )
+                self.succeeded.emit(message)
+            else:
+                debug_log(
+                    "TTS",
+                    "后台预热 TTS 服务失败",
+                    {"provider": type(self.provider).__name__, "message": message},
+                )
+                self.failed.emit(message)
+        except Exception as exc:  # noqa: BLE001
+            message = f"TTS 服务预热失败：{exc}"
+            debug_log(
+                "TTS",
+                "后台预热 TTS 服务异常",
+                {"provider": type(self.provider).__name__, "error": str(exc)},
+            )
+            self.failed.emit(message)
+        finally:
+            self.finished.emit()
+
+
 class PetWindow(QWidget):
     memory_status_changed = Signal(str, str)
 
@@ -251,6 +296,8 @@ class PetWindow(QWidget):
         self.startup_initializing = context.startup_initializing
         self.deferred_startup_thread: QThread | None = None
         self.deferred_startup_worker: QObject | None = None
+        self.tts_ready_warmup_thread: QThread | None = None
+        self.tts_ready_warmup_worker: QObject | None = None
         self.settings_service = context.settings_service
         self.character_registry = context.character_registry
         self.character_profile = context.character_profile
@@ -296,6 +343,7 @@ class PetWindow(QWidget):
         self.memory_curation_mode = ""
         self.memory_curation_target_history_count = 0
         self.memory_curation_consumed_turns = 0
+        self.pending_history_clear_after_curation = False
         self.drag_offset: QPoint | None = None
         self.portrait_scale_percent = self._load_portrait_scale_percent()
         (
@@ -320,6 +368,7 @@ class PetWindow(QWidget):
         self.active_event: AgentEvent | None = None
         self.memory_status_message_active = False
         self.memory_status_last_message = ""
+        self.memory_failure_dialog_last_message = ""
         self.last_user_activity_at = time.perf_counter()
         self.last_proactive_care_at: float | None = None
         self.last_proactive_screen_context_at: float | None = None
@@ -462,6 +511,7 @@ class PetWindow(QWidget):
         self.speech_timer = self.subtitle_controller.speech_timer
         if not self.startup_initializing:
             QTimer.singleShot(0, self._warm_up_current_tts_playback)
+            QTimer.singleShot(0, self._start_current_tts_ready_warmup)
 
         bubble_header = QHBoxLayout()
         bubble_header.setContentsMargins(0, 0, 0, 0)
@@ -1949,6 +1999,8 @@ class PetWindow(QWidget):
             return
         if not self.memory_curation_settings.enabled:
             return
+        if self.pending_history_clear_after_curation:
+            return
         state = self.memory_curation_state.snapshot()
         if state.get("backfill_completed"):
             return
@@ -2073,9 +2125,32 @@ class PetWindow(QWidget):
         self.memory_curation_mode = ""
         self.memory_curation_target_history_count = 0
         self.memory_curation_consumed_turns = 0
+        if self.pending_history_clear_after_curation:
+            self.pending_history_clear_after_curation = False
+            if self._start_pending_history_clear_after_curation():
+                return
         if self.history_window is not None:
             self.history_window.set_memory_save_busy(False)
         QTimer.singleShot(0, self._maybe_start_auto_memory_curation)
+
+    def _start_pending_history_clear_after_curation(self) -> bool:
+        if not self._memory_curation_can_start():
+            return False
+        entries = self.history_store.load()
+        if not entries:
+            if self.history_window is not None:
+                self.history_window.refresh()
+            return False
+        if not self._memory_store_ready_for_history_clear():
+            self._show_memory_not_ready_for_history_clear()
+            return False
+        self._start_memory_curation(
+            entries,
+            mode="history_clear",
+            target_history_count=len(entries),
+            consumed_turns=self.memory_curation_state.pending_turns(),
+        )
+        return self.memory_curation_thread is not None
 
     @Slot(object)
     def apply_deferred_services(self, services: "DeferredStartupServices") -> None:
@@ -2093,6 +2168,7 @@ class PetWindow(QWidget):
         self.voice_playback_controller.set_provider(services.tts_provider)
         self._connect_tts_error_signal(services.tts_provider)
         self._warm_up_tts_playback(services.tts_provider)
+        self._start_tts_ready_warmup(services.tts_provider)
         self.tool_registry = services.tool_registry
         self.free_access_enabled = self.tool_registry.free_access_enabled
         self.agent_runtime.tools = services.tool_registry
@@ -2214,6 +2290,42 @@ class PetWindow(QWidget):
                 },
             )
 
+    def _start_current_tts_ready_warmup(self) -> None:
+        self._start_tts_ready_warmup(self.tts_provider)
+
+    def _start_tts_ready_warmup(self, provider: TTSProvider) -> None:
+        if isinstance(provider, NullTTSProvider):
+            debug_log("TTS", "TTS 已关闭，跳过服务预热")
+            return
+        ensure_ready = getattr(provider, "ensure_ready", None)
+        if not callable(ensure_ready):
+            return
+        if self.tts_ready_warmup_thread is not None:
+            debug_log("TTS", "TTS 服务预热已在进行，跳过重复请求")
+            return
+
+        thread = QThread(self)
+        worker = TTSReadyWarmupWorker(provider)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.failed.connect(self._handle_tts_ready_warmup_failed)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_tts_ready_warmup_worker)
+        self.tts_ready_warmup_thread = thread
+        self.tts_ready_warmup_worker = worker
+        thread.start()
+
+    @Slot(str)
+    def _handle_tts_ready_warmup_failed(self, message: str) -> None:
+        self._show_tts_error(message)
+
+    @Slot()
+    def _cleanup_tts_ready_warmup_worker(self) -> None:
+        self.tts_ready_warmup_thread = None
+        self.tts_ready_warmup_worker = None
+
     def _apply_startup_initializing_state(self) -> None:
         self.input_edit.setPlaceholderText(STARTUP_INITIALIZING_TEXT)
         self._set_busy(True)
@@ -2267,15 +2379,22 @@ class PetWindow(QWidget):
             self._show_memory_ready_message(message)
 
     def _show_memory_status_message(self, status: str, message: str) -> None:
-        _ = status
         self.memory_status_message_active = True
         self.memory_status_last_message = message
+        if status == "failed":
+            self._show_memory_failure_dialog(message)
         if (
             not self.startup_initializing
             and not self.active_interaction_id
             and not self.reply_history_review_active
         ):
             self.subtitle_controller.show_text_immediately(message)
+
+    def _show_memory_failure_dialog(self, message: str) -> None:
+        if getattr(self, "memory_failure_dialog_last_message", "") == message:
+            return
+        self.memory_failure_dialog_last_message = message
+        show_themed_warning(self, "记忆模型下载失败", message)
 
     @Slot()
     def _show_pending_memory_status_after_startup(self) -> None:
@@ -2368,6 +2487,14 @@ class PetWindow(QWidget):
 
     def _save_history_to_memory_and_clear(self) -> None:
         if self.memory_curation_thread is not None:
+            if self.memory_curation_mode in {"auto", "backfill"}:
+                self.pending_history_clear_after_curation = True
+                show_themed_information(
+                    self,
+                    "整理中",
+                    "当前正在自动整理记忆，结束后会继续清空并保存历史。",
+                )
+                return
             show_themed_information(self, "整理中", "记忆整理已经在进行中，请稍后再试。")
             if self.history_window is not None:
                 self.history_window.set_memory_save_busy(False)
@@ -2383,12 +2510,34 @@ class PetWindow(QWidget):
                 self.history_window.set_memory_save_busy(False)
                 self.history_window.refresh()
             return
+        if not self._memory_store_ready_for_history_clear():
+            self._show_memory_not_ready_for_history_clear()
+            if self.history_window is not None:
+                self.history_window.set_memory_save_busy(False)
+            return
         self._start_memory_curation(
             entries,
             mode="history_clear",
             target_history_count=len(entries),
             consumed_turns=self.memory_curation_state.pending_turns(),
         )
+
+    def _memory_store_ready_for_history_clear(self) -> bool:
+        is_ready = getattr(self.memory_store, "is_ready", None)
+        if not callable(is_ready):
+            return True
+        try:
+            return bool(is_ready())
+        except Exception as exc:  # noqa: BLE001
+            debug_log("Memory", "检查长期记忆就绪状态失败", {"error": str(exc)})
+            return False
+
+    def _show_memory_not_ready_for_history_clear(self) -> None:
+        message = getattr(self, "memory_status_last_message", "") or (
+            "长期记忆系统还在初始化。首次启动或覆盖更新后，"
+            "可能需要准备本地嵌入模型，请稍等就绪后再试。"
+        )
+        show_themed_information(self, "记忆初始化中", message)
 
     @Slot()
     def show_settings(self) -> None:
@@ -2537,6 +2686,9 @@ class PetWindow(QWidget):
         if callable(connect_tts_error_signal):
             connect_tts_error_signal(new_tts_provider)
         self._warm_up_tts_playback(new_tts_provider)
+        start_tts_ready_warmup = getattr(self, "_start_tts_ready_warmup", None)
+        if callable(start_tts_ready_warmup):
+            start_tts_ready_warmup(new_tts_provider)
         self._apply_character(selected_profile)
         if hasattr(self, "tray_icon"):
             self.tray_icon.setContextMenu(self._build_menu())

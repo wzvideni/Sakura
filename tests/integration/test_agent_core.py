@@ -371,6 +371,18 @@ def test_memory_store_preload_only_creates_runtime_once() -> None:
     assert store.is_ready()
 
 
+def test_memory_store_returns_failed_response_for_nonblocking_memory_tools() -> None:
+    store = MemoryStore(base_dir=_runtime_root_path("memory_failed_nonblocking"))
+    store._load_error = "Cannot send a request, as the client has been closed."
+
+    result = store.search_memory({"query": "偏好"}, wait=False)
+
+    assert result["status"] == "failed"
+    assert "普通聊天仍可继续" in result["message"]
+    assert result["memories"] == []
+    assert "client has been closed" in result["error"]
+
+
 def test_memory_store_reload_keeps_old_runtime_until_new_runtime_is_ready() -> None:
     old_settings = ApiSettings("https://old.example.com/v1", "old-key", "old-model")
     new_settings = ApiSettings("https://new.example.com/v1", "new-key", "new-model")
@@ -580,7 +592,9 @@ def test_memory_store_ignores_incomplete_local_embedding_cache(monkeypatch) -> N
 
     config = store.build_mem0_config()
 
-    assert config["embedder"]["config"]["model_kwargs"] == {}
+    assert config["embedder"]["config"]["model_kwargs"] == {
+        "cache_folder": str(root / "runtime" / "hf-cache" / "hub"),
+    }
 
 
 def test_memory_store_create_update_search_and_delete() -> None:
