@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -398,6 +399,88 @@ def test_memory_store_reload_keeps_old_runtime_until_new_runtime_is_ready() -> N
         if store._memory is not old_runtime:
             break
         time.sleep(0.05)
+    assert store._memory == {"settings": new_settings}
+
+
+def test_memory_store_reload_existing_runtime_replaces_only_llm() -> None:
+    old_settings = ApiSettings("https://old.example.com/v1", "old-key", "old-model")
+    new_settings = ApiSettings("https://new.example.com/v1", "new-key", "new-model")
+
+    class HotReloadMemoryStore(MemoryStore):
+        def __init__(self) -> None:
+            super().__init__(
+                base_dir=_runtime_root_path("memory_reload_llm_only"),
+                api_settings=old_settings,
+            )
+            self.create_memory_calls = 0
+            self.create_llm_calls = 0
+
+        def _create_memory_client(self, api_settings=None):  # type: ignore[no-untyped-def]
+            self.create_memory_calls += 1
+            return {"settings": api_settings}
+
+        def _create_memory_llm(self, api_settings):  # type: ignore[no-untyped-def]
+            self.create_llm_calls += 1
+            return {"settings": api_settings}, {"settings": api_settings}
+
+    store = HotReloadMemoryStore()
+    old_config = {"settings": old_settings}
+    old_llm = {"settings": old_settings}
+    runtime = SimpleNamespace(config=SimpleNamespace(llm=old_config), llm=old_llm)
+    store._memory = runtime
+
+    store.reload_api_settings(new_settings, wait=True)
+
+    assert store._memory is runtime
+    assert store.create_memory_calls == 0
+    assert store.create_llm_calls == 1
+    assert runtime.config.llm == {"settings": new_settings}
+    assert runtime.llm == {"settings": new_settings}
+    assert store._reload_error == ""
+
+
+def test_memory_store_reload_llm_failure_keeps_old_runtime_llm() -> None:
+    old_settings = ApiSettings("https://old.example.com/v1", "old-key", "old-model")
+    new_settings = ApiSettings("https://new.example.com/v1", "new-key", "new-model")
+
+    class FailingLlmReloadMemoryStore(MemoryStore):
+        def _create_memory_llm(self, api_settings):  # type: ignore[no-untyped-def]
+            raise RuntimeError("llm failed")
+
+    store = FailingLlmReloadMemoryStore(
+        base_dir=_runtime_root_path("memory_reload_llm_failure"),
+        api_settings=old_settings,
+    )
+    old_config = {"settings": old_settings}
+    old_llm = {"settings": old_settings}
+    runtime = SimpleNamespace(config=SimpleNamespace(llm=old_config), llm=old_llm)
+    store._memory = runtime
+
+    store.reload_api_settings(new_settings, wait=True)
+
+    assert store._memory is runtime
+    assert runtime.config.llm is old_config
+    assert runtime.llm is old_llm
+    assert store._reload_error == "llm failed"
+
+
+def test_memory_store_reload_without_runtime_still_creates_memory_client() -> None:
+    new_settings = ApiSettings("https://new.example.com/v1", "new-key", "new-model")
+
+    class ColdReloadMemoryStore(MemoryStore):
+        def __init__(self) -> None:
+            super().__init__(base_dir=_runtime_root_path("memory_reload_cold"))
+            self.create_memory_calls = 0
+
+        def _create_memory_client(self, api_settings=None):  # type: ignore[no-untyped-def]
+            self.create_memory_calls += 1
+            return {"settings": api_settings}
+
+    store = ColdReloadMemoryStore()
+
+    store.reload_api_settings(new_settings, wait=True)
+
+    assert store.create_memory_calls == 1
     assert store._memory == {"settings": new_settings}
 
 

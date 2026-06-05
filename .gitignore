@@ -10,6 +10,7 @@ __pycache__/
 .venv/
 venv/
 runtime/
+/tts/
 env/
 node_modules/
 characters/
@@ -47,6 +48,10 @@ plugins/*
 !plugins/playwright_browser/**
 plugins/playwright_browser/__pycache__/
 plugins/playwright_browser/**/*.py[cod]
+!plugins/example_plugin/
+!plugins/example_plugin/**
+plugins/example_plugin/__pycache__/
+plugins/example_plugin/**/*.py[cod]
 
 # 备份文件
 *.bak

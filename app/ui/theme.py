@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -70,6 +71,13 @@ class ThemeSettings:
 
 
 DEFAULT_THEME_SETTINGS = ThemeSettings()
+_SETTINGS_ARROW_DOWN_URL = (
+    Path(__file__).with_name("assets").joinpath("chevron-down.svg").resolve().as_posix()
+)
+_SETTINGS_ARROW_UP_URL = (
+    Path(__file__).with_name("assets").joinpath("chevron-up.svg").resolve().as_posix()
+)
+_MENU_CHECK_URL = Path(__file__).with_name("assets").joinpath("menu-check.svg").resolve().as_posix()
 
 
 def normalize_hex_color(value: object, default: str) -> str:
@@ -94,13 +102,19 @@ def theme_from_mapping(data: Any) -> ThemeSettings:
 
 
 def theme_to_mapping(settings: ThemeSettings) -> dict[str, object]:
+    data = theme_colors_to_mapping(settings)
+    data["ai_enabled"] = bool(settings.normalized().ai_enabled)
+    return data
+
+
+def theme_colors_to_mapping(settings: ThemeSettings) -> dict[str, object]:
     normalized = settings.normalized()
-    data = {
+    return {
         field: getattr(normalized, field)
         for field, _label, _default in THEME_COLOR_FIELDS
     }
-    data["ai_enabled"] = bool(normalized.ai_enabled)
-    return data
+
+
 def _extract_json_text(raw_text: str) -> str:
     """从 AI 返回的原始文本中提取 JSON，兼容纯 JSON 和 Markdown 代码块。"""
     text = raw_text.strip()
@@ -158,8 +172,6 @@ def build_color_button_stylesheet(color: str) -> str:
 
 def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
     theme = settings.normalized()
-    if _uses_default_colors(theme):
-        return DEFAULT_PET_WINDOW_STYLESHEET
     return f"""
 #speechBubble {{
     background: {rgba(theme.bubble_background_color, 220)};
@@ -196,7 +208,8 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
     font-weight: 900;
 }}
 #replyHistoryButton:hover {{
-    background: rgba(255, 255, 255, 130);
+    background: transparent;
+    border: none;
     color: {theme.accent_color};
 }}
 #replyHistoryButton:disabled {{
@@ -227,18 +240,25 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
 #sendButton, #screenshotButton {{
     background: {rgba(theme.primary_color, 232)};
     border: 1px solid rgba(255, 255, 255, 150);
-    border-radius: 16px;
+    border-radius: 19px;
     color: white;
     font-size: 15px;
     font-weight: 800;
     padding: 4px 12px;
 }}
 #sendButton {{
+    border-radius: 16px;
     min-width: 68px;
     padding: 4px 14px;
 }}
 #screenshotButton {{
-    min-width: 58px;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    max-width: 36px;
+    min-height: 36px;
+    max-height: 36px;
+    padding: 0;
 }}
 #sendButton:hover, #screenshotButton:hover {{
     background: {rgba(theme.primary_hover_color, 242)};
@@ -274,13 +294,47 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
     min-width: 58px;
     padding: 4px 12px;
 }}
+QMenu {{
+    background: {rgba(theme.input_background_color, 246)};
+    border: 1px solid {rgba(theme.border_color, 164)};
+    border-radius: 8px;
+    color: {theme.text_color};
+    font-size: 14px;
+    padding: 4px;
+}}
+QMenu::item {{
+    background: transparent;
+    border-radius: 6px;
+    padding: 4px 20px 4px 24px;
+}}
+QMenu::item:selected {{
+    background: {rgba(theme.panel_background_color, 220)};
+    color: {theme.text_color};
+}}
+QMenu::item:disabled {{
+    color: {rgba(theme.muted_text_color, 145)};
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {rgba(theme.border_color, 105)};
+    margin: 3px 7px;
+}}
+QMenu::indicator {{
+    width: 14px;
+    height: 14px;
+    left: 6px;
+}}
+QMenu::indicator:checked {{
+    image: url("{_MENU_CHECK_URL}");
+}}
+QMenu::indicator:unchecked {{
+    image: none;
+}}
 """
 
 
 def build_settings_dialog_stylesheet(settings: ThemeSettings) -> str:
     theme = settings.normalized()
-    if _uses_default_colors(theme):
-        return DEFAULT_SETTINGS_DIALOG_STYLESHEET
     return f"""
 QDialog {{
     background: {theme.page_background_color};
@@ -308,6 +362,30 @@ QTabBar::tab:selected {{
     color: {theme.accent_color};
     font-weight: 700;
 }}
+QScrollArea#settingsScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea#settingsScrollArea > QWidget {{
+    background: transparent;
+}}
+QWidget#settingsScrollContent, QWidget#settingsSectionContent, QWidget#settingsPluginTab, QWidget#settingsScrollViewport {{
+    background: transparent;
+}}
+QGroupBox {{
+    background: {rgba(theme.panel_background_color, 116)};
+    border: 1px solid {rgba(theme.border_color, 130)};
+    border-radius: 8px;
+    color: {theme.secondary_text_color};
+    font-weight: 700;
+    margin-top: 12px;
+    padding-top: 10px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+}}
 QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QTableWidget, QComboBox {{
     background: {rgba(theme.input_background_color, 235)};
     border: 1px solid {rgba(theme.border_color, 148)};
@@ -315,6 +393,105 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QTableWidget, QComboBox {{
     padding: 6px 8px;
     color: {theme.text_color};
     selection-background-color: {rgba(theme.primary_color, 71)};
+}}
+QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QTextEdit:disabled, QComboBox:disabled {{
+    background: {rgba(mix(theme.panel_background_color, "#808080", 0.16), 172)};
+    border: 1px solid {rgba(mix(theme.border_color, "#808080", 0.28), 102)};
+    color: {rgba(theme.muted_text_color, 138)};
+    selection-background-color: transparent;
+}}
+QLineEdit[readOnly="true"] {{
+    background: {rgba(mix(theme.panel_background_color, "#808080", 0.14), 188)};
+    border: 1px solid {rgba(mix(theme.border_color, "#808080", 0.22), 118)};
+    color: {rgba(theme.muted_text_color, 172)};
+    selection-background-color: transparent;
+}}
+QComboBox {{
+    padding: 6px 30px 6px 8px;
+}}
+QComboBox::drop-down {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 26px;
+    border-left: 1px solid {rgba(theme.border_color, 105)};
+    border-top-right-radius: 7px;
+    border-bottom-right-radius: 7px;
+    background: {rgba(theme.panel_background_color, 138)};
+}}
+QComboBox::drop-down:hover {{
+    background: {rgba(theme.panel_background_color, 205)};
+}}
+QComboBox::drop-down:disabled {{
+    background: {rgba(mix(theme.panel_background_color, "#808080", 0.20), 126)};
+    border-left: 1px solid {rgba(mix(theme.border_color, "#808080", 0.28), 86)};
+}}
+QComboBox::down-arrow {{
+    image: url("{_SETTINGS_ARROW_DOWN_URL}");
+    width: 12px;
+    height: 12px;
+}}
+QComboBox QAbstractItemView {{
+    background: {rgba(theme.input_background_color, 246)};
+    border: 1px solid {rgba(theme.border_color, 158)};
+    border-radius: 7px;
+    color: {theme.text_color};
+    font-size: 14px;
+    outline: 0;
+    padding: 2px;
+    selection-background-color: {rgba(theme.panel_background_color, 220)};
+    selection-color: {theme.text_color};
+}}
+QComboBox QAbstractItemView::item {{
+    min-height: 22px;
+    padding: 3px 8px;
+    border-radius: 5px;
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background: {rgba(theme.panel_background_color, 185)};
+}}
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:selected:active,
+QComboBox QAbstractItemView::item:selected:!active {{
+    background: {rgba(theme.primary_color, 43)};
+    color: {theme.text_color};
+}}
+QSpinBox, QDoubleSpinBox {{
+    padding: 6px 28px 6px 8px;
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 22px;
+    border-left: 1px solid {rgba(theme.border_color, 105)};
+    border-top-right-radius: 7px;
+    background: {rgba(theme.panel_background_color, 120)};
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 22px;
+    border-left: 1px solid {rgba(theme.border_color, 105)};
+    border-bottom-right-radius: 7px;
+    background: {rgba(theme.panel_background_color, 120)};
+}}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background: {rgba(theme.panel_background_color, 205)};
+}}
+QSpinBox::up-button:disabled, QDoubleSpinBox::up-button:disabled,
+QSpinBox::down-button:disabled, QDoubleSpinBox::down-button:disabled {{
+    background: {rgba(mix(theme.panel_background_color, "#808080", 0.20), 126)};
+    border-left: 1px solid {rgba(mix(theme.border_color, "#808080", 0.28), 86)};
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: url("{_SETTINGS_ARROW_UP_URL}");
+    width: 12px;
+    height: 12px;
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: url("{_SETTINGS_ARROW_DOWN_URL}");
+    width: 12px;
+    height: 12px;
 }}
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus, QComboBox:focus {{
     border: 1px solid {rgba(theme.primary_color, 194)};
@@ -366,10 +543,45 @@ QPushButton:disabled {{
 """
 
 
+def build_message_box_stylesheet(settings: ThemeSettings) -> str:
+    theme = settings.normalized()
+    return f"""
+QMessageBox {{
+    background: {theme.page_background_color};
+    color: {theme.text_color};
+    font-family: "Microsoft YaHei", "Yu Gothic UI", sans-serif;
+    font-size: 14px;
+}}
+QMessageBox QLabel {{
+    color: {theme.text_color};
+    font-size: 14px;
+    line-height: 1.35;
+}}
+QMessageBox QPushButton {{
+    background: {theme.primary_color};
+    border: 1px solid {rgba(theme.accent_color, 140)};
+    border-radius: 8px;
+    color: white;
+    min-width: 76px;
+    padding: 7px 14px;
+    font-weight: 600;
+}}
+QMessageBox QPushButton:hover {{
+    background: {theme.primary_hover_color};
+}}
+QMessageBox QPushButton:pressed {{
+    background: {theme.accent_color};
+}}
+QMessageBox QPushButton:disabled {{
+    background: {rgba(theme.primary_color, 107)};
+    border: 1px solid {rgba(theme.border_color, 115)};
+    color: rgba(255, 255, 255, 0.76);
+}}
+"""
+
+
 def build_history_window_stylesheet(settings: ThemeSettings) -> str:
     theme = settings.normalized()
-    if _uses_default_colors(theme):
-        return DEFAULT_HISTORY_WINDOW_STYLESHEET
     return f"""
 QDialog {{
     background: {theme.page_background_color};
@@ -496,14 +708,6 @@ def _rgb(hex_color: str) -> tuple[int, int, int]:
     return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
 
 
-def _uses_default_colors(settings: ThemeSettings) -> bool:
-    normalized = settings.normalized()
-    return all(
-        getattr(normalized, field) == default
-        for field, _label, default in THEME_COLOR_FIELDS
-    )
-
-
 def _extract_json_text(raw_text: str) -> str:
     text = _strip_json_code_block(raw_text)
     try:
@@ -543,320 +747,6 @@ def _bool_value(value: object, default: bool) -> bool:
     return default
 
 
-DEFAULT_PET_WINDOW_STYLESHEET = """
-#speechBubble {
-    background: rgba(255, 232, 241, 220);
-    border: 1px solid rgba(238, 172, 200, 158);
-    border-radius: 26px;
-}
-#speakerName {
-    color: #d55b91;
-    font-size: 13px;
-    font-weight: 700;
-}
-#speechText {
-    color: #4b3440;
-    font-size: 19px;
-    line-height: 1.35;
-}
-#ttsErrorText {
-    color: #9f314e;
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 1.25;
-}
-#replyHistoryPanel {
-    background: rgba(255, 255, 255, 92);
-    border: 1px solid rgba(238, 172, 200, 154);
-    border-radius: 17px;
-}
-#replyHistoryButton {
-    background: transparent;
-    border: none;
-    border-radius: 13px;
-    color: #7a3656;
-    font-size: 15px;
-    font-weight: 900;
-}
-#replyHistoryButton:hover {
-    background: rgba(255, 255, 255, 130);
-    color: #b13e73;
-}
-#replyHistoryButton:disabled {
-    background: transparent;
-    color: rgba(122, 54, 86, 92);
-}
-#inputBar {
-    background: transparent;
-    border: none;
-}
-#petInput {
-    background: rgba(255, 255, 255, 96);
-    border: 1px solid rgba(255, 255, 255, 218);
-    border-radius: 19px;
-    color: #2f2630;
-    font-size: 15px;
-    font-weight: 700;
-    padding: 3px 16px;
-    selection-background-color: rgba(213, 91, 145, 92);
-}
-#petInput:focus {
-    background: rgba(255, 255, 255, 132);
-    border: 1px solid rgba(213, 91, 145, 210);
-}
-#petInput:disabled {
-    color: rgba(47, 38, 48, 150);
-}
-#sendButton {
-    background: rgba(213, 91, 145, 232);
-    border: 1px solid rgba(255, 255, 255, 150);
-    border-radius: 16px;
-    color: white;
-    font-size: 15px;
-    font-weight: 800;
-    min-width: 68px;
-    padding: 4px 14px;
-}
-#sendButton:hover {
-    background: rgba(191, 63, 122, 242);
-    border: 1px solid rgba(255, 241, 247, 190);
-}
-#sendButton:disabled {
-    background: rgba(213, 91, 145, 118);
-    border: 1px solid rgba(238, 172, 200, 92);
-    color: rgba(255, 255, 255, 178);
-}
-#screenshotButton {
-    background: rgba(213, 91, 145, 232);
-    border: 1px solid rgba(255, 255, 255, 150);
-    border-radius: 16px;
-    color: white;
-    font-size: 15px;
-    font-weight: 800;
-    min-width: 58px;
-    padding: 4px 12px;
-}
-#screenshotButton:hover {
-    background: rgba(191, 63, 122, 242);
-    border: 1px solid rgba(255, 241, 247, 190);
-}
-#screenshotButton[screenshotAttached="true"] {
-    background: rgba(177, 62, 115, 242);
-    border: 1px solid rgba(255, 221, 235, 220);
-    color: white;
-}
-#screenshotButton:disabled {
-    background: rgba(213, 91, 145, 118);
-    border: 1px solid rgba(238, 172, 200, 92);
-    color: rgba(255, 255, 255, 178);
-}
-#confirmActionButton {
-    background: rgba(93, 181, 130, 225);
-    border: none;
-    border-radius: 16px;
-    color: white;
-    font-size: 15px;
-    font-weight: 800;
-    min-width: 58px;
-    padding: 4px 12px;
-}
-#cancelActionButton {
-    background: rgba(180, 130, 146, 210);
-    border: none;
-    border-radius: 16px;
-    color: white;
-    font-size: 15px;
-    font-weight: 800;
-    min-width: 58px;
-    padding: 4px 12px;
-}
-"""
-
-
-DEFAULT_SETTINGS_DIALOG_STYLESHEET = """
-QDialog {
-    background: #fff6fa;
-    color: #3d2b35;
-    font-family: "Microsoft YaHei", "Yu Gothic UI", sans-serif;
-    font-size: 14px;
-}
-QTabWidget::pane {
-    border: 1px solid rgba(238, 172, 200, 0.54);
-    border-radius: 8px;
-    background: rgba(255, 232, 241, 0.70);
-}
-QTabBar::tab {
-    background: rgba(255, 232, 241, 0.75);
-    border: 1px solid rgba(238, 172, 200, 0.48);
-    border-bottom: none;
-    border-top-left-radius: 8px;
-    border-top-right-radius: 8px;
-    padding: 7px 18px;
-    margin-right: 4px;
-    color: #7a3656;
-}
-QTabBar::tab:selected {
-    background: #ffffff;
-    color: #b13e73;
-    font-weight: 700;
-}
-QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QTableWidget, QComboBox {
-    background: rgba(255, 255, 255, 0.92);
-    border: 1px solid rgba(238, 172, 200, 0.58);
-    border-radius: 7px;
-    padding: 6px 8px;
-    color: #3d2b35;
-    selection-background-color: rgba(213, 91, 145, 0.28);
-}
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus, QComboBox:focus {
-    border: 1px solid rgba(213, 91, 145, 0.76);
-    background: #ffffff;
-}
-QTableWidget {
-    gridline-color: rgba(238, 172, 200, 0.42);
-    alternate-background-color: rgba(255, 244, 249, 0.86);
-}
-QHeaderView::section {
-    background: #ffe8f1;
-    border: 1px solid rgba(238, 172, 200, 0.52);
-    color: #7a3656;
-    padding: 6px;
-    font-weight: 700;
-}
-QCheckBox {
-    color: #4b3440;
-    spacing: 8px;
-}
-QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border-radius: 4px;
-    border: 1px solid rgba(213, 91, 145, 0.68);
-    background: #ffffff;
-}
-QCheckBox::indicator:checked {
-    background: #d55b91;
-    border: 1px solid #b13e73;
-}
-QPushButton {
-    background: #d55b91;
-    border: 1px solid rgba(177, 62, 115, 0.55);
-    border-radius: 8px;
-    color: white;
-    min-width: 72px;
-    padding: 8px 12px;
-    font-weight: 600;
-}
-QPushButton:hover {
-    background: #bf3f7a;
-}
-QPushButton:disabled {
-    background: rgba(213, 91, 145, 0.42);
-    border: 1px solid rgba(238, 172, 200, 0.45);
-    color: rgba(255, 255, 255, 0.76);
-}
-"""
-
-
-DEFAULT_HISTORY_WINDOW_STYLESHEET = """
-QDialog {
-    background: #fff6fa;
-    color: #3d2b35;
-    font-family: "Microsoft YaHei", "Yu Gothic UI", sans-serif;
-    font-size: 16px;
-}
-QLabel#historyTitle {
-    color: #7a3656;
-    font-size: 22px;
-    font-weight: 700;
-}
-QLabel#historyCount {
-    color: #9b4f72;
-    background: rgba(255, 232, 241, 0.78);
-    border: 1px solid rgba(238, 172, 200, 0.48);
-    border-radius: 12px;
-    padding: 5px 10px;
-    font-size: 13px;
-}
-QScrollArea#historyScroll {
-    background: rgba(255, 244, 249, 0.94);
-    border: 1px solid rgba(238, 172, 200, 0.54);
-    border-radius: 14px;
-}
-QWidget#historyContent {
-    background: transparent;
-}
-QFrame#assistantBubble {
-    background: #fffafd;
-    border: 1px solid #f1c7d9;
-    border-radius: 14px;
-}
-QFrame#userBubble {
-    background: #ffe3ee;
-    border: 1px solid #eeb0ca;
-    border-radius: 14px;
-}
-QFrame#errorBubble {
-    background: #ffe9e7;
-    border: 1px solid #efc2bd;
-    border-radius: 14px;
-}
-QFrame#systemBubble {
-    background: #fff0f6;
-    border: 1px solid #efd0dc;
-    border-radius: 12px;
-}
-QLabel#entryMeta {
-    color: #a0647f;
-    font-size: 13px;
-}
-QLabel#entryText {
-    color: #3d2b35;
-    font-size: 16px;
-    line-height: 155%;
-}
-QLabel#errorText {
-    color: #9f393a;
-    font-size: 16px;
-    line-height: 155%;
-}
-QLabel#systemText {
-    color: #7e5d6b;
-    font-size: 15px;
-    line-height: 155%;
-}
-QPushButton {
-    background: rgba(255, 255, 255, 0.90);
-    border: 1px solid rgba(238, 172, 200, 0.58);
-    border-radius: 8px;
-    color: #7a3656;
-    min-width: 72px;
-    padding: 8px 12px;
-    font-size: 15px;
-    font-weight: 600;
-}
-QPushButton:hover {
-    background: rgba(255, 232, 241, 0.96);
-    border: 1px solid rgba(213, 91, 145, 0.62);
-}
-QPushButton#dangerButton {
-    background: #fff1f5;
-    border: 1px solid rgba(199, 88, 122, 0.52);
-    color: #b13e5a;
-}
-QPushButton#dangerButton:hover {
-    background: #ffe1ea;
-}
-QPushButton#primaryButton {
-    background: #d55b91;
-    border: 1px solid rgba(177, 62, 115, 0.55);
-    color: white;
-}
-QPushButton#primaryButton:hover {
-    background: #bf3f7a;
-}
-QPushButton#secondaryButton:default {
-    background: #d55b91;
-    color: white;
-}
-"""
+DEFAULT_PET_WINDOW_STYLESHEET = build_pet_window_stylesheet(DEFAULT_THEME_SETTINGS)
+DEFAULT_SETTINGS_DIALOG_STYLESHEET = build_settings_dialog_stylesheet(DEFAULT_THEME_SETTINGS)
+DEFAULT_HISTORY_WINDOW_STYLESHEET = build_history_window_stylesheet(DEFAULT_THEME_SETTINGS)

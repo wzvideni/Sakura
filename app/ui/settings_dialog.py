@@ -9,7 +9,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -19,12 +19,16 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGroupBox,
     QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QMenu,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QTableWidget,
@@ -41,7 +45,9 @@ from app.core.debug_log import debug_log
 from app.config.character_archive import (
     CharacterArchiveError,
     export_character_archive,
+    export_character_voice_archive,
     import_character_archive,
+    import_character_voice_archive,
 )
 from app.config.settings_service import DebugLogSettings
 from app.llm.api_client import (
@@ -50,7 +56,14 @@ from app.llm.api_client import (
     STRUCTURED_JSON_RESPONSE_FORMAT,
 )
 from app.llm.prompts.recipes import build_theme_color_system_prompt
-from app.config.character_loader import CharacterProfile, CharacterRegistry
+from app.plugins.discovery import PluginDiscovery, save_plugin_enabled_overrides
+from app.plugins.models import PluginSpec
+from app.config.character_loader import (
+    CharacterProfile,
+    CharacterRegistry,
+    THEME_SOURCE_COMPAT_DEFAULT,
+    THEME_SOURCE_PACKAGE,
+)
 from app.ui.portrait_controller import (
     PORTRAIT_SCALE_DEFAULT_PERCENT,
     PORTRAIT_SCALE_MAX_PERCENT,
@@ -98,7 +111,7 @@ from app.ui.theme import (
     parse_ai_theme_response,
 )
 from app.voice.tts_bundle import default_provider_bundle_work_dir, is_provider_bundle_work_dir
-from sdk.types import ToolsTabContribution
+from sdk.types import SettingsPanelContribution, ToolsTabContribution
 
 
 MEMORY_READING_TEXT = "正在读取长期记忆..."
@@ -237,15 +250,23 @@ class CharacterArchiveExportWorker(QObject):
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, profile: CharacterProfile, output_path: Path) -> None:
+    def __init__(self, profile: CharacterProfile, output_path: Path, export_kind: Literal["full", "card", "voice"]) -> None:
         super().__init__()
         self.profile = profile
         self.output_path = output_path
+        self.export_kind = export_kind
 
     @Slot()
     def run(self) -> None:
         try:
-            export_character_archive(self.profile, self.output_path)
+            if self.export_kind == "voice":
+                export_character_voice_archive(self.profile, self.output_path)
+            else:
+                export_character_archive(
+                    self.profile,
+                    self.output_path,
+                    include_voice=self.export_kind == "full",
+                )
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
         else:
@@ -267,6 +288,7 @@ class SettingsDialog(QDialog):
         debug_log_settings: DebugLogSettings | None = None,
         memory_store: MemoryStore | None = None,
         tools_tab_contributions: list[ToolsTabContribution] | None = None,
+        settings_panel_contributions: list[SettingsPanelContribution] | None = None,
         parent=None,  # type: ignore[no-untyped-def]
         portrait_scale_percent: int = PORTRAIT_SCALE_DEFAULT_PERCENT,
         subtitle_typing_interval_ms: int = SPEECH_TYPING_INTERVAL_MS,
@@ -277,8 +299,18 @@ class SettingsDialog(QDialog):
         self.base_dir = base_dir
         self.tts_settings = tts_settings
         self._initial_api_settings = api_settings
+        self._initial_tts_settings = tts_settings
         self._initial_character_id = current_character.id if current_character is not None else None
-        self.theme_settings = (theme_settings or DEFAULT_THEME_SETTINGS).normalized()
+        self.theme_settings = _theme_settings_for_character(
+            theme_settings or DEFAULT_THEME_SETTINGS,
+            current_character,
+        )
+        self.plugin_specs: list[PluginSpec] = PluginDiscovery(self.base_dir).discover()
+        self._plugin_specs_by_id = {
+            spec.plugin_id: spec
+            for spec in self.plugin_specs
+            if spec.plugin_id
+        }
         self.character_registry = character_registry
         self.current_character = current_character
         self.portrait_scale_percent = normalize_portrait_scale_percent(portrait_scale_percent)
@@ -306,6 +338,8 @@ class SettingsDialog(QDialog):
         self.result_mcp_settings: MCPRuntimeSettings | None = None
         self.result_debug_log_settings: DebugLogSettings | None = None
         self.result_theme_settings: ThemeSettings | None = None
+        self.result_theme_write_mode: Literal["unchanged", "manual", "ai", "reset", "character"] = "unchanged"
+        self.result_plugin_config_changed = False
         self._api_test_thread: QThread | None = None
         self._api_test_worker: ApiConnectionTestWorker | None = None
         self._tts_test_thread: QThread | None = None
@@ -317,31 +351,62 @@ class SettingsDialog(QDialog):
         self._memory_list_worker: MemoryListWorker | None = None
         self._theme_ai_thread: QThread | None = None
         self._theme_ai_worker: ThemeAiWorker | None = None
+        self._theme_ai_enabled = self.theme_settings.ai_enabled
+        self._theme_write_mode: Literal["unchanged", "manual", "ai", "reset", "character"] = "unchanged"
+        self._syncing_theme_controls = False
         self._character_export_thread: QThread | None = None
         self._character_export_worker: CharacterArchiveExportWorker | None = None
         self._memory_reload_pending = False
         self._syncing_memory_selection = False
 
         self.setWindowTitle("设置")
-        self.resize(560, 400)
+        self.setMinimumSize(680, 500)
+        self.resize(820, 640)
 
         tabs = QTabWidget(self)
-        tabs.addTab(self._build_character_tab(character_registry, current_character), "角色")
-        tabs.addTab(self._build_theme_tab(), "主题")
-        tabs.addTab(self._build_api_tab(api_settings), "API")
-        tabs.addTab(self._build_tts_tab(tts_settings), "TTS")
         tabs.addTab(
-            self._build_privacy_tab(
-                proactive_care_settings or ProactiveCareSettings(),
+            self._build_grouped_settings_tab(
+                [
+                    ("角色", self._build_character_tab(character_registry, current_character)),
+                    ("主题", self._build_theme_tab()),
+                ]
             ),
-            "隐私",
+            "角色与外观",
         )
         tabs.addTab(
-            self._build_mcp_tab(
-                mcp_settings or MCPRuntimeSettings(),
-                tools_tab_contributions or [],
+            self._build_grouped_settings_tab(
+                [
+                    ("API", self._build_api_tab(api_settings)),
+                    ("TTS", self._build_tts_tab(tts_settings)),
+                ]
             ),
-            "工具",
+            "模型与语音",
+        )
+        tabs.addTab(
+            self._build_grouped_settings_tab(
+                [
+                    (
+                        "隐私",
+                        self._build_privacy_tab(
+                            proactive_care_settings or ProactiveCareSettings(),
+                        ),
+                    ),
+                    (
+                        "工具",
+                        self._build_mcp_tab(
+                            mcp_settings or MCPRuntimeSettings(),
+                            tools_tab_contributions or [],
+                        ),
+                    ),
+                ]
+            ),
+            "权限与工具",
+        )
+        tabs.addTab(
+            self._build_scrollable_tab(
+                self._build_plugin_tab(settings_panel_contributions or [])
+            ),
+            "插件",
         )
         tabs.addTab(self._build_system_tab(debug_log_settings or DebugLogSettings()), "系统")
         if memory_store is not None:
@@ -359,7 +424,50 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs, 1)
         layout.addWidget(buttons)
         self.setLayout(layout)
+        self._capture_initial_tts_settings_from_controls()
         self._apply_theme_stylesheet(self.theme_settings)
+
+    def _capture_initial_tts_settings_from_controls(self) -> None:
+        settings = self._validated_tts_settings(
+            show_warnings=False,
+            validate_enabled=False,
+        )
+        if settings is not None:
+            self._initial_tts_settings = settings
+
+    def _build_grouped_settings_tab(self, sections: list[tuple[str, QWidget]]) -> QWidget:
+        content = QWidget(self)
+        content.setObjectName("settingsScrollContent")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setSpacing(12)
+        for title, section in sections:
+            section.setObjectName("settingsSectionContent")
+            group = QGroupBox(title, content)
+            group_layout = QVBoxLayout()
+            group_layout.setContentsMargins(0, 0, 0, 0)
+            group_layout.setSpacing(0)
+            group_layout.addWidget(section)
+            group.setLayout(group_layout)
+            layout.addWidget(group)
+        layout.addStretch(1)
+        content.setLayout(layout)
+        return self._build_scrollable_tab(content)
+
+    def _build_scrollable_tab(self, content: QWidget) -> QWidget:
+        tab = QWidget(self)
+        scroll_area = QScrollArea(tab)
+        scroll_area.setObjectName("settingsScrollArea")
+        scroll_area.viewport().setObjectName("settingsScrollViewport")
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setWidget(content)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll_area)
+        tab.setLayout(layout)
+        return tab
 
     def _build_character_tab(
         self,
@@ -372,7 +480,7 @@ class SettingsDialog(QDialog):
         self._refresh_character_combo(
             current_character.id if current_character is not None else None
         )
-        self.character_combo.currentIndexChanged.connect(lambda _index: self._sync_theme_ai_controls())
+        self.character_combo.currentIndexChanged.connect(lambda _index: self._handle_character_selection_changed())
 
         form_layout = QFormLayout()
         form_layout.setContentsMargins(16, 18, 16, 16)
@@ -388,15 +496,35 @@ class SettingsDialog(QDialog):
     def _build_character_archive_controls(self, parent: QWidget) -> QWidget:
         container = QWidget(parent)
         self.character_import_button = QPushButton("导入 .char", container)
-        self.character_export_button = QPushButton("导出当前角色", container)
+        self.tts_voice_import_button = QPushButton("导入 .voice", container)
+        self.tts_voice_import_button.setToolTip("为当前选中的角色导入单独的 TTS 模型包。")
+        self.character_export_button = QPushButton("导出", container)
+        self.character_export_menu = QMenu(self.character_export_button)
+        self.character_export_full_action = QAction("导出完整包 (.char)", self)
+        self.character_export_card_action = QAction("导出单角色包 (.char)", self)
+        self.character_export_voice_action = QAction("导出语音包 (.voice)", self)
+        self.character_export_full_action.triggered.connect(
+            lambda _checked=False: self._export_current_character_archive("full")
+        )
+        self.character_export_card_action.triggered.connect(
+            lambda _checked=False: self._export_current_character_archive("card")
+        )
+        self.character_export_voice_action.triggered.connect(
+            lambda _checked=False: self._export_current_character_archive("voice")
+        )
+        self.character_export_menu.addAction(self.character_export_full_action)
+        self.character_export_menu.addAction(self.character_export_card_action)
+        self.character_export_menu.addAction(self.character_export_voice_action)
+        self.character_export_button.setMenu(self.character_export_menu)
         self.character_import_button.clicked.connect(self._import_character_archive)
-        self.character_export_button.clicked.connect(self._export_current_character_archive)
+        self.tts_voice_import_button.clicked.connect(self._import_character_voice_archive)
         self._sync_character_archive_controls()
 
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         layout.addWidget(self.character_import_button)
+        layout.addWidget(self.tts_voice_import_button)
         layout.addWidget(self.character_export_button)
         layout.addStretch(1)
         container.setLayout(layout)
@@ -406,9 +534,6 @@ class SettingsDialog(QDialog):
         tab = QWidget(self)
         self.theme_color_edits: dict[str, QLineEdit] = {}
         self.theme_color_buttons: dict[str, QPushButton] = {}
-        self.theme_ai_enabled_check = QCheckBox("启用 AI 选择配色", tab)
-        self.theme_ai_enabled_check.setChecked(self.theme_settings.ai_enabled)
-        self.theme_ai_enabled_check.toggled.connect(self._sync_theme_ai_controls)
 
         self.theme_ai_generate_button = QPushButton("AI 生成配色", tab)
         self.theme_ai_generate_button.clicked.connect(self._generate_ai_theme)
@@ -443,7 +568,6 @@ class SettingsDialog(QDialog):
         self.theme_accent_button = self.theme_color_buttons["accent_color"]
         self.theme_text_edit = self.theme_color_edits["text_color"]
         self.theme_text_button = self.theme_color_buttons["text_color"]
-        form_layout.addRow("", self.theme_ai_enabled_check)
         form_layout.addRow("", button_row)
         form_layout.addRow("状态", self.theme_status_label)
         tab.setLayout(form_layout)
@@ -566,6 +690,7 @@ class SettingsDialog(QDialog):
         )
         self.tts_bundle_download_button.clicked.connect(self._download_gpt_sovits_bundle)
         self.tts_provider_combo.currentIndexChanged.connect(lambda _index: self._sync_tts_provider_controls(apply_defaults=True))
+        self.tts_enabled_check.toggled.connect(self._sync_tts_enabled_controls)
 
         self.ref_lang_edit = QLineEdit(settings.ref_lang, tab)
         self.text_lang_edit = QLineEdit(settings.text_lang, tab)
@@ -575,21 +700,31 @@ class SettingsDialog(QDialog):
         self.tts_timeout_spin.setSuffix(" 秒")
         self.tts_timeout_spin.setValue(settings.timeout_seconds)
 
+        enabled_row = QWidget(tab)
+        enabled_layout = QHBoxLayout()
+        enabled_layout.setContentsMargins(0, 0, 0, 0)
+        enabled_layout.setSpacing(10)
+        enabled_layout.addWidget(self.tts_enabled_check)
+        enabled_layout.addWidget(self.tts_bundle_download_button)
+        enabled_layout.addStretch(1)
+        enabled_row.setLayout(enabled_layout)
+
         form_layout = QFormLayout()
         form_layout.setContentsMargins(16, 18, 16, 16)
         form_layout.setSpacing(12)
-        form_layout.addRow("", self.tts_enabled_check)
+        form_layout.addRow("", enabled_row)
         form_layout.addRow("TTS 提供器", self.tts_provider_combo)
         form_layout.addRow("API URL", self.tts_api_url_edit)
         form_layout.addRow("TTS 工作目录", self.tts_work_dir_edit)
         form_layout.addRow("TTS Python", self.tts_python_path_edit)
         form_layout.addRow("推理配置", self.tts_config_path_edit)
-        form_layout.addRow("", self.tts_bundle_download_button)
         form_layout.addRow("参考语言", self.ref_lang_edit)
         form_layout.addRow("文本语言", self.text_lang_edit)
         form_layout.addRow("超时", self.tts_timeout_spin)
+        self._tts_form_layout = form_layout
         tab.setLayout(form_layout)
         self._sync_tts_provider_controls(apply_defaults=_is_bundled_tts_provider(settings.provider))
+        self._sync_tts_enabled_controls(settings.enabled)
         return tab
 
     def _build_privacy_tab(
@@ -632,10 +767,7 @@ class SettingsDialog(QDialog):
             proactive_care_settings.normalized().screen_context_batch_limit
         )
         self.proactive_screen_context_enabled_check.toggled.connect(
-            self._sync_proactive_interval_controls
-        )
-        self._sync_proactive_interval_controls(
-            self.proactive_screen_context_enabled_check.isChecked()
+            self._sync_proactive_screen_context_controls
         )
 
         form_layout = QFormLayout()
@@ -645,7 +777,11 @@ class SettingsDialog(QDialog):
         form_layout.addRow("主动检查间隔", self.proactive_check_interval_spin)
         form_layout.addRow("主动打扰冷却", self.proactive_cooldown_spin)
         form_layout.addRow("单次最多发送截图", self.proactive_batch_limit_spin)
+        self._proactive_form_layout = form_layout
         tab.setLayout(form_layout)
+        self._sync_proactive_screen_context_controls(
+            self.proactive_screen_context_enabled_check.isChecked()
+        )
         return tab
 
     def _build_mcp_tab(
@@ -680,6 +816,138 @@ class SettingsDialog(QDialog):
             form_layout.addRow(contribution.title, widget)
         tab.setLayout(form_layout)
         return tab
+
+    def _build_plugin_tab(
+        self,
+        settings_panel_contributions: list[SettingsPanelContribution],
+    ) -> QWidget:
+        tab = QWidget(self)
+        tab.setObjectName("settingsPluginTab")
+        layout = QVBoxLayout()
+        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setSpacing(12)
+
+        hint = QLabel("插件启用状态保存后需要重启 Sakura 才会生效。", tab)
+        hint.setObjectName("pluginRestartHintLabel")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.plugin_table = QTableWidget(tab)
+        self.plugin_table.setObjectName("pluginManagerTable")
+        self.plugin_table.setColumnCount(6)
+        self.plugin_table.setHorizontalHeaderLabels(["启用", "名称", "版本", "优先级", "来源", "介绍"])
+        self.plugin_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.plugin_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.plugin_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.plugin_table.setAlternatingRowColors(True)
+        self.plugin_table.setWordWrap(True)
+        self.plugin_table.verticalHeader().setVisible(False)
+        self.plugin_table.setRowCount(len(self.plugin_specs))
+        header = self.plugin_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        for row, spec in enumerate(self.plugin_specs):
+            self._populate_plugin_table_row(row, spec)
+        self.plugin_table.resizeRowsToContents()
+        layout.addWidget(self.plugin_table, 1)
+
+        panel_title = QLabel("插件自定义设置", tab)
+        panel_title.setObjectName("pluginSettingsTitleLabel")
+        layout.addWidget(panel_title)
+
+        panel_container = QWidget(tab)
+        form_layout = QFormLayout()
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setSpacing(10)
+        for contribution in sorted(settings_panel_contributions, key=lambda item: item.order):
+            try:
+                widget = contribution.build(tab)
+            except Exception as exc:
+                widget = QLabel(f"{contribution.title} 设置加载失败：{exc}", tab)
+                widget.setWordWrap(True)
+            form_layout.addRow(contribution.title, widget)
+        if not settings_panel_contributions:
+            empty_label = QLabel("暂无插件自定义设置。", tab)
+            empty_label.setWordWrap(True)
+            form_layout.addRow("", empty_label)
+        panel_container.setLayout(form_layout)
+        layout.addWidget(panel_container)
+        tab.setLayout(layout)
+        return tab
+
+    def _populate_plugin_table_row(self, row: int, spec: PluginSpec) -> None:
+        enabled_item = QTableWidgetItem("")
+        enabled_item.setData(Qt.ItemDataRole.UserRole, spec.plugin_id)
+        enabled_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self.plugin_table.setItem(row, 0, enabled_item)
+        self._set_plugin_checkbox_widget(row, spec)
+
+        values = [
+            spec.name or spec.plugin_id or spec.entry,
+            spec.version,
+            str(spec.priority),
+            "内置清单" if spec.source == "manifest" else "配置",
+            spec.description or "暂无介绍。",
+        ]
+        for column, value in enumerate(values, start=1):
+            item = QTableWidgetItem(value)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if column == 5:
+                item.setToolTip(value)
+            self.plugin_table.setItem(row, column, item)
+        self._apply_plugin_row_style(row)
+
+    def _set_plugin_checkbox_widget(self, row: int, spec: PluginSpec) -> None:
+        container = QWidget(self.plugin_table)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        checkbox = QCheckBox(container)
+        checkbox.setChecked(spec.enabled or spec.required)
+        checkbox.setEnabled(not spec.required)
+        checkbox.setToolTip("启用此插件" if not spec.required else "必需插件不可禁用。")
+        checkbox.stateChanged.connect(lambda _state, current_row=row: self._apply_plugin_row_style(current_row))
+        layout.addWidget(checkbox, 0, Qt.AlignmentFlag.AlignCenter)
+        container.setLayout(layout)
+        self.plugin_table.setCellWidget(row, 0, container)
+        self._style_plugin_checkbox_container(container, row)
+
+    def _apply_plugin_row_style(self, row: int) -> None:
+        brush = _memory_row_background(row, False, self.theme_settings)
+        for column in range(self.plugin_table.columnCount()):
+            item = self.plugin_table.item(row, column)
+            if item is not None:
+                item.setBackground(brush)
+        container = self.plugin_table.cellWidget(row, 0)
+        if container is not None:
+            self._style_plugin_checkbox_container(container, row)
+
+    def _style_plugin_checkbox_container(self, container: QWidget, row: int) -> None:
+        color = _memory_row_background_color(row, False, self.theme_settings)
+        container.setStyleSheet(f"background: {color};")
+
+    def _selected_plugin_enabled_overrides(self) -> dict[str, bool]:
+        if not hasattr(self, "plugin_table"):
+            return {}
+        selected: dict[str, bool] = {}
+        for row in range(self.plugin_table.rowCount()):
+            item = self.plugin_table.item(row, 0)
+            if item is None:
+                continue
+            plugin_id = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(plugin_id, str) or not plugin_id:
+                continue
+            spec = self._plugin_specs_by_id.get(plugin_id)
+            container = self.plugin_table.cellWidget(row, 0)
+            checkbox = container.findChild(QCheckBox) if container is not None else None
+            selected[plugin_id] = bool(
+                spec.required if spec is not None and spec.required else checkbox is not None and checkbox.isChecked()
+            )
+        return selected
 
     def _build_system_tab(self, debug_settings: DebugLogSettings) -> QWidget:
         tab = QWidget(self)
@@ -720,11 +988,72 @@ class SettingsDialog(QDialog):
         return tab
 
     @Slot(bool)
-    def _sync_proactive_interval_controls(self, enabled: bool) -> None:
-        """主动屏幕获取关闭时，不允许调整主动关怀时间参数。"""
-        self.proactive_check_interval_spin.setEnabled(enabled)
-        self.proactive_cooldown_spin.setEnabled(enabled)
-        self.proactive_batch_limit_spin.setEnabled(enabled)
+    def _sync_proactive_screen_context_controls(self, enabled: bool) -> None:
+        """主动屏幕获取关闭时，不允许调整从属参数。"""
+        self._set_form_widgets_enabled(
+            getattr(self, "_proactive_form_layout", None),
+            (
+                self.proactive_check_interval_spin,
+                self.proactive_cooldown_spin,
+                self.proactive_batch_limit_spin,
+            ),
+            enabled,
+        )
+
+    def _sync_tts_enabled_controls(self, enabled: bool) -> None:
+        """同步 TTS 总开关和整合包模式下的从属控件可交互状态。"""
+        provider = str(self.tts_provider_combo.currentData() or TTS_PROVIDER_GPT_SOVITS)
+        bundled = _is_bundled_tts_provider(provider)
+        bundled_fields = (
+            self.tts_api_url_edit,
+            self.tts_work_dir_edit,
+            self.tts_python_path_edit,
+            self.tts_config_path_edit,
+        )
+        self._set_form_widgets_enabled(
+            getattr(self, "_tts_form_layout", None),
+            (self.tts_provider_combo,),
+            enabled,
+        )
+        self._set_form_widgets_enabled(
+            getattr(self, "_tts_form_layout", None),
+            bundled_fields,
+            enabled and not bundled,
+            labels_enabled=enabled,
+        )
+        self._set_form_widgets_enabled(
+            getattr(self, "_tts_form_layout", None),
+            (
+                self.ref_lang_edit,
+                self.text_lang_edit,
+                self.tts_timeout_spin,
+            ),
+            enabled,
+        )
+        self.tts_bundle_download_button.setEnabled(True)
+        self._sync_voice_import_controls()
+
+    def _sync_voice_import_controls(self) -> None:
+        if hasattr(self, "tts_voice_import_button"):
+            self.tts_voice_import_button.setEnabled(
+                self._character_export_thread is None and self._selected_character_profile() is not None
+            )
+
+    def _set_form_widgets_enabled(
+        self,
+        form_layout: QFormLayout | None,
+        widgets: tuple[QWidget, ...],
+        enabled: bool,
+        *,
+        labels_enabled: bool | None = None,
+    ) -> None:
+        for widget in widgets:
+            widget.setEnabled(enabled)
+            if form_layout is None:
+                continue
+            label = form_layout.labelForField(widget)
+            if label is not None:
+                label.setEnabled(enabled if labels_enabled is None else labels_enabled)
 
     def _build_memory_tab(self, memory_store: MemoryStore) -> QWidget:
         tab = QWidget(self)
@@ -1316,6 +1645,9 @@ class SettingsDialog(QDialog):
         edit.setText(color.name())
 
     def _handle_theme_color_changed(self, edit: QLineEdit) -> None:
+        if not self._syncing_theme_controls:
+            self._theme_ai_enabled = False
+            self._theme_write_mode = "manual"
         button = self._theme_button_for_edit(edit)
         normalized = normalize_hex_color(edit.text(), "")
         if button is not None and normalized:
@@ -1345,32 +1677,41 @@ class SettingsDialog(QDialog):
             normalized_values[field] = normalized
         return ThemeSettings(
             **normalized_values,
-            ai_enabled=self.theme_ai_enabled_check.isChecked(),
+            ai_enabled=self._theme_ai_enabled,
         ).normalized()
 
     def _set_theme_controls(self, settings: ThemeSettings) -> None:
         theme = settings.normalized()
-        for field, _label, _default in THEME_COLOR_FIELDS:
-            self.theme_color_edits[field].setText(getattr(theme, field))
-            self.theme_color_buttons[field].setStyleSheet(
-                build_color_button_stylesheet(getattr(theme, field))
-            )
-        self.theme_ai_enabled_check.setChecked(theme.ai_enabled)
+        self._syncing_theme_controls = True
+        try:
+            for field, _label, _default in THEME_COLOR_FIELDS:
+                self.theme_color_edits[field].setText(getattr(theme, field))
+                self.theme_color_buttons[field].setStyleSheet(
+                    build_color_button_stylesheet(getattr(theme, field))
+                )
+        finally:
+            self._syncing_theme_controls = False
+        self._theme_ai_enabled = theme.ai_enabled
         self._apply_theme_stylesheet(theme)
         self._sync_theme_ai_controls()
 
     @Slot()
     def _reset_theme_colors(self) -> None:
-        current_ai_enabled = self.theme_ai_enabled_check.isChecked()
-        self._set_theme_controls(ThemeSettings(ai_enabled=current_ai_enabled))
-        self.theme_status_label.setText("已恢复默认 Sakura 粉色配色。")
+        profile = self._selected_character_profile()
+        if profile is None:
+            self._set_theme_controls(ThemeSettings())
+            self.theme_status_label.setText("已恢复默认 Sakura 粉色配色。")
+        else:
+            self._set_theme_controls(profile.theme_settings or DEFAULT_THEME_SETTINGS)
+            if profile.theme_source == THEME_SOURCE_COMPAT_DEFAULT:
+                self.theme_status_label.setText("已恢复默认 Sakura 粉色配色。")
+            else:
+                self.theme_status_label.setText(f"已恢复角色「{profile.display_name}」的默认主题。")
+        self._theme_write_mode = "reset"
 
     @Slot()
     def _generate_ai_theme(self) -> None:
         if self._theme_ai_thread is not None:
-            return
-        if not self.theme_ai_enabled_check.isChecked():
-            QMessageBox.information(self, "AI 配色未启用", "请先启用 AI 选择配色。")
             return
         api_settings = self._validated_api_settings()
         if api_settings is None:
@@ -1389,7 +1730,7 @@ class SettingsDialog(QDialog):
         worker = ThemeAiWorker(
             api_settings,
             profile,
-            ai_enabled=self.theme_ai_enabled_check.isChecked(),
+            ai_enabled=True,
         )
         worker.moveToThread(thread)
         self._theme_ai_thread = thread
@@ -1409,6 +1750,7 @@ class SettingsDialog(QDialog):
             self._handle_theme_ai_failed("AI 返回的主题格式无效。")
             return
         self._set_theme_controls(settings)
+        self._theme_write_mode = "ai"
         self.theme_status_label.setText("AI 配色已生成并应用预览。")
 
     @Slot(str)
@@ -1418,7 +1760,7 @@ class SettingsDialog(QDialog):
     def _set_theme_ai_busy(self, busy: bool) -> None:
         if hasattr(self, "theme_ai_generate_button"):
             self.theme_ai_generate_button.setEnabled(
-                not busy and self.theme_ai_enabled_check.isChecked()
+                not busy and self._theme_ai_generation_available()
             )
         if hasattr(self, "theme_reset_button"):
             self.theme_reset_button.setEnabled(not busy)
@@ -1434,15 +1776,24 @@ class SettingsDialog(QDialog):
     @Slot()
     def _sync_theme_ai_controls(self) -> None:
         if hasattr(self, "theme_ai_generate_button"):
-            profile = self._selected_character_profile()
-            has_default_portrait = (
-                profile is not None and profile.default_portrait_path.exists()
-            )
             self.theme_ai_generate_button.setEnabled(
-                self.theme_ai_enabled_check.isChecked()
-                and self._theme_ai_thread is None
-                and has_default_portrait
+                self._theme_ai_thread is None and self._theme_ai_generation_available()
             )
+
+    def _handle_character_selection_changed(self) -> None:
+        profile = self._selected_character_profile()
+        if profile is not None and hasattr(self, "theme_color_edits"):
+            self._set_theme_controls(profile.theme_settings or DEFAULT_THEME_SETTINGS)
+            self._theme_write_mode = "character"
+            if hasattr(self, "theme_status_label"):
+                self.theme_status_label.setText(f"已载入角色「{profile.display_name}」的主题。")
+        self._sync_theme_ai_controls()
+        self._sync_character_archive_controls()
+        self._sync_voice_import_controls()
+
+    def _theme_ai_generation_available(self) -> bool:
+        profile = self._selected_character_profile()
+        return profile is not None and profile.default_portrait_path.exists()
 
     def accept(self) -> None:
         if self._api_test_thread is not None:
@@ -1487,7 +1838,10 @@ class SettingsDialog(QDialog):
             isinstance(tts_settings, GPTSoVITSTTSSettings)
             and tts_settings.enabled
             and isinstance(character_id, str)
-            and character_id != self._initial_character_id
+            and (
+                character_id != self._initial_character_id
+                or tts_settings != self._initial_tts_settings
+            )
         )
 
     def _collect_accept_values(self) -> dict[str, object] | None:
@@ -1568,6 +1922,12 @@ class SettingsDialog(QDialog):
         if not isinstance(debug_log_settings, DebugLogSettings):
             return
 
+        try:
+            plugin_config_changed = self._save_plugin_settings_if_needed()
+        except OSError as exc:
+            QMessageBox.critical(self, "保存失败", f"无法保存插件配置：{exc}")
+            return
+
         self.result_api_settings = api_settings
         self.result_tts_settings = tts_settings
         self.result_character_id = character_id
@@ -1575,10 +1935,18 @@ class SettingsDialog(QDialog):
         self.result_subtitle_typing_interval_ms = subtitle_typing_interval_ms
         self.result_reply_segment_pause_ms = reply_segment_pause_ms
         self.result_theme_settings = theme_settings
+        self.result_theme_write_mode = self._theme_write_mode
         self.result_proactive_care_settings = proactive_care_settings
         self.result_mcp_settings = mcp_settings
         self.result_debug_log_settings = debug_log_settings
+        self.result_plugin_config_changed = plugin_config_changed
         super().accept()
+
+    def _save_plugin_settings_if_needed(self) -> bool:
+        enabled_by_id = self._selected_plugin_enabled_overrides()
+        if not enabled_by_id:
+            return False
+        return save_plugin_enabled_overrides(self.base_dir, enabled_by_id)
 
     def reject(self) -> None:
         if self._api_test_thread is not None:
@@ -1781,11 +2149,11 @@ class SettingsDialog(QDialog):
         if python_path is not None:
             self.tts_python_path_edit.setText(str(python_path))
         else:
-            self.tts_python_path_edit.clear()
+            self.tts_python_path_edit.setText(_bundle_python_path_display(provider, dialog.downloaded_work_dir))
         if tts_config_path is not None:
             self.tts_config_path_edit.setText(str(tts_config_path))
         else:
-            self.tts_config_path_edit.clear()
+            self.tts_config_path_edit.setText(_bundle_tts_config_display(provider, dialog.downloaded_work_dir))
         self.tts_api_url_edit.setText(_default_tts_api_url(provider))
         self.tts_enabled_check.setChecked(True)
         self._sync_tts_provider_controls()
@@ -1809,12 +2177,15 @@ class SettingsDialog(QDialog):
             self.tts_api_url_edit.setText(_default_tts_api_url(provider))
             work_dir = default_provider_bundle_work_dir(provider, self.base_dir)
             self.tts_work_dir_edit.setText(str(work_dir or ""))
-            self.tts_python_path_edit.clear()
-            self.tts_config_path_edit.clear()
+            self.tts_python_path_edit.setText(_bundle_python_path_display(provider, work_dir))
+            self.tts_config_path_edit.setText(_bundle_tts_config_display(provider, work_dir))
         elif provider == TTS_PROVIDER_CUSTOM_GPT_SOVITS and apply_defaults:
             work_dir = _optional_path(self.tts_work_dir_edit.text(), self.base_dir)
             if work_dir is not None and is_provider_bundle_work_dir(work_dir, self.base_dir):
                 self.tts_work_dir_edit.clear()
+            self.tts_python_path_edit.clear()
+            self.tts_config_path_edit.clear()
+        self._sync_tts_enabled_controls(self.tts_enabled_check.isChecked())
 
     def _import_character_archive(self) -> None:
         if self._character_export_thread is not None:
@@ -1832,44 +2203,110 @@ class SettingsDialog(QDialog):
             result = import_character_archive(Path(path_text), self.base_dir)
             self.character_registry = CharacterRegistry(self.base_dir)
             self._refresh_character_combo(result.character_id)
+            self._handle_character_selection_changed()
             self._sync_character_archive_controls()
+            imported_profile = self._selected_character_profile()
+        except (CharacterArchiveError, OSError, ValueError) as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
+            return
+        if imported_profile is not None and imported_profile.voice is None:
+            self.tts_enabled_check.setChecked(False)
+            QMessageBox.information(
+                self,
+                "导入成功",
+                (
+                    f"已导入角色「{result.display_name}」。该角色没有语音包，TTS 已自动关闭。"
+                    "可稍后导入 .voice 语音包。点击保存后会切换到该角色。"
+                ),
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "导入成功",
+                f"已导入角色「{result.display_name}」。点击保存后会切换到该角色。",
+            )
+
+    def _import_character_voice_archive(self) -> None:
+        if self._character_export_thread is not None:
+            QMessageBox.information(self, "导出中", "角色包导出仍在进行，请等待完成后再导入语音包。")
+            return
+        profile = self._selected_character_profile()
+        if profile is None:
+            QMessageBox.warning(self, "导入失败", "请先导入并选择一个角色。")
+            return
+        path_text, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入 Sakura TTS 模型包",
+            str(self.base_dir),
+            "Sakura TTS 模型包 (*.voice)",
+        )
+        if not path_text:
+            return
+        try:
+            result = import_character_voice_archive(Path(path_text), self.base_dir, profile.id)
+            self.character_registry = CharacterRegistry(self.base_dir)
+            self._refresh_character_combo(result.character_id)
+            imported_profile = self._selected_character_profile()
+            if imported_profile is not None and imported_profile.voice is not None:
+                self.ref_lang_edit.setText(imported_profile.voice.ref_lang)
+                self.text_lang_edit.setText(imported_profile.voice.text_lang)
+            self._sync_voice_import_controls()
         except (CharacterArchiveError, OSError, ValueError) as exc:
             QMessageBox.warning(self, "导入失败", str(exc))
             return
         QMessageBox.information(
             self,
             "导入成功",
-            f"已导入角色「{result.display_name}」。点击保存后会切换到该角色。",
+            f"已为角色「{result.display_name}」导入 TTS 模型包。",
         )
 
-    def _export_current_character_archive(self) -> None:
+    def _export_current_character_archive(self, export_kind: Literal["full", "card", "voice"] = "full") -> None:
         if self._character_export_thread is not None:
             return
         profile = self._selected_character_profile()
         if profile is None:
             QMessageBox.warning(self, "导出失败", "当前没有可导出的角色。")
             return
+        if export_kind == "voice" and profile.voice is None:
+            QMessageBox.warning(self, "导出失败", "当前角色没有可导出的语音包。")
+            return
+        if export_kind == "voice":
+            title = "导出 Sakura TTS 模型包"
+            default_name = f"{profile.id}.voice"
+            file_filter = "Sakura TTS 模型包 (*.voice)"
+            suffix = ".voice"
+        elif export_kind == "card":
+            title = "导出 Sakura 单角色包"
+            default_name = f"{profile.id}.card.char"
+            file_filter = "Sakura 角色包 (*.char)"
+            suffix = ".char"
+        else:
+            title = "导出 Sakura 完整角色包"
+            default_name = f"{profile.id}.char"
+            file_filter = "Sakura 角色包 (*.char)"
+            suffix = ".char"
         output_text, _ = QFileDialog.getSaveFileName(
             self,
-            "导出 Sakura 角色包",
-            str(self.base_dir / f"{profile.id}.char"),
-            "Sakura 角色包 (*.char)",
+            title,
+            str(self.base_dir / default_name),
+            file_filter,
         )
         if not output_text:
             return
         output_path = Path(output_text)
-        if output_path.suffix.lower() != ".char":
-            output_path = output_path.with_suffix(".char")
-        self._start_character_archive_export(profile, output_path)
+        if output_path.suffix.lower() != suffix:
+            output_path = output_path.with_suffix(suffix)
+        self._start_character_archive_export(profile, output_path, export_kind)
 
     def _start_character_archive_export(
         self,
         profile: CharacterProfile,
         output_path: Path,
+        export_kind: Literal["full", "card", "voice"] = "full",
     ) -> None:
         self._set_character_export_busy(True)
         thread = QThread()
-        worker = CharacterArchiveExportWorker(profile, output_path)
+        worker = CharacterArchiveExportWorker(profile, output_path, export_kind)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.succeeded.connect(self._handle_character_export_success)
@@ -1898,6 +2335,7 @@ class SettingsDialog(QDialog):
         self._set_character_export_busy(False)
 
     def _set_character_export_busy(self, busy: bool) -> None:
+        profile = self._selected_character_profile()
         if hasattr(self, "button_box"):
             save_button = self.button_box.button(QDialogButtonBox.StandardButton.Save)
             cancel_button = self.button_box.button(QDialogButtonBox.StandardButton.Cancel)
@@ -1908,12 +2346,35 @@ class SettingsDialog(QDialog):
         if hasattr(self, "character_import_button"):
             self.character_import_button.setEnabled(not busy)
         if hasattr(self, "character_export_button"):
-            self.character_export_button.setEnabled(
-                not busy and self._selected_character_profile() is not None
-            )
+            self.character_export_button.setEnabled(not busy and profile is not None)
+        self._sync_character_export_actions(profile=profile, busy=busy)
+        if hasattr(self, "tts_voice_import_button"):
+            self._sync_voice_import_controls()
 
     def _sync_character_archive_controls(self) -> None:
         self._set_character_export_busy(self._character_export_thread is not None)
+
+    def _sync_character_export_actions(
+        self,
+        *,
+        profile: CharacterProfile | None = None,
+        busy: bool | None = None,
+    ) -> None:
+        if not hasattr(self, "character_export_full_action"):
+            return
+        if profile is None:
+            profile = self._selected_character_profile()
+        if busy is None:
+            busy = self._character_export_thread is not None
+        has_profile = profile is not None
+        has_voice = has_profile and profile.voice is not None
+        for action in (self.character_export_full_action, self.character_export_card_action):
+            action.setEnabled(not busy and has_profile)
+        self.character_export_voice_action.setEnabled(not busy and has_voice)
+        if has_voice:
+            self.character_export_voice_action.setToolTip("导出当前角色的 .voice TTS 模型包。")
+        else:
+            self.character_export_voice_action.setToolTip("当前角色没有可导出的语音包。")
 
     def _validated_api_settings(self) -> ApiSettings | None:
         base_url = self.base_url_edit.text().strip().rstrip("/")
@@ -1937,21 +2398,38 @@ class SettingsDialog(QDialog):
             timeout_seconds=self.api_timeout_spin.value(),
         )
 
-    def _validated_tts_settings(self) -> GPTSoVITSTTSSettings | None:
+    def _validated_tts_settings(
+        self,
+        *,
+        show_warnings: bool = True,
+        validate_enabled: bool = True,
+    ) -> GPTSoVITSTTSSettings | None:
         enabled = self.tts_enabled_check.isChecked()
         provider = str(self.tts_provider_combo.currentData() or TTS_PROVIDER_GPT_SOVITS)
+        bundled = _is_bundled_tts_provider(provider)
         api_url = self.tts_api_url_edit.text().strip()
         work_dir = _optional_path(self.tts_work_dir_edit.text(), self.base_dir)
-        python_path = _optional_path(self.tts_python_path_edit.text(), self.base_dir)
-        tts_config_path = _optional_path(self.tts_config_path_edit.text(), self.base_dir)
+        python_path = None if bundled else _optional_path(self.tts_python_path_edit.text(), self.base_dir)
+        tts_config_path = None if bundled else _optional_path(self.tts_config_path_edit.text(), self.base_dir)
         ref_lang = self.ref_lang_edit.text().strip()
         text_lang = self.text_lang_edit.text().strip()
+        selected_profile = self._selected_character_profile()
+
+        if enabled and selected_profile is not None and selected_profile.voice is None:
+            enabled = False
+            if show_warnings:
+                self.tts_enabled_check.setChecked(False)
+                QMessageBox.warning(
+                    self,
+                    "TTS 已关闭",
+                    "当前角色没有语音包，TTS 已自动关闭。请先导入 .voice 语音包后再启用 TTS。",
+                )
 
         if enabled and not _is_http_url(api_url):
-            QMessageBox.warning(self, "配置无效", "TTS API URL 必须是有效的 http 或 https 地址。")
+            if show_warnings:
+                QMessageBox.warning(self, "配置无效", "TTS API URL 必须是有效的 http 或 https 地址。")
             return None
 
-        selected_profile = self._selected_character_profile()
         if selected_profile is not None:
             settings = GPTSoVITSTTSSettings.from_character_profile(
                 character_profile=selected_profile,
@@ -1991,11 +2469,12 @@ class SettingsDialog(QDialog):
                 timeout_seconds=self.tts_timeout_spin.value(),
                 tone_references=self.tts_settings.tone_references,
             )
-        if enabled:
+        if enabled and validate_enabled:
             try:
                 settings.validate()
             except TTSConfigError as exc:
-                QMessageBox.warning(self, "配置无效", str(exc))
+                if show_warnings:
+                    QMessageBox.warning(self, "配置无效", str(exc))
                 return None
         return settings
 
@@ -2043,11 +2522,21 @@ class SettingsDialog(QDialog):
         self.character_combo.blockSignals(False)
         self._sync_character_archive_controls()
         self._sync_theme_ai_controls()
+        self._sync_voice_import_controls()
 
 
 def _is_http_url(url: str) -> bool:
     parsed_url = urlparse(url)
     return parsed_url.scheme in {"http", "https"} and bool(parsed_url.netloc)
+
+
+def _theme_settings_for_character(
+    settings: ThemeSettings,
+    profile: CharacterProfile | None,
+) -> ThemeSettings:
+    if profile is not None and profile.theme_source == THEME_SOURCE_PACKAGE:
+        return (profile.theme_settings or DEFAULT_THEME_SETTINGS).normalized()
+    return settings.normalized()
 
 
 def _default_tts_api_url(provider: str) -> str:
@@ -2056,6 +2545,20 @@ def _default_tts_api_url(provider: str) -> str:
 
 def _is_bundled_tts_provider(provider: str) -> bool:
     return provider in {TTS_PROVIDER_GPT_SOVITS, TTS_PROVIDER_GENIE}
+
+
+def _bundle_python_path_display(provider: str, work_dir: Path | None) -> str:
+    if not _is_bundled_tts_provider(provider) or work_dir is None:
+        return ""
+    return str(work_dir / "runtime" / "python.exe")
+
+
+def _bundle_tts_config_display(provider: str, work_dir: Path | None) -> str:
+    if provider == TTS_PROVIDER_GPT_SOVITS and work_dir is not None:
+        return str(work_dir / "GPT_SoVITS" / "configs" / "tts_infer.yaml")
+    if provider == TTS_PROVIDER_GENIE:
+        return "Genie TTS 整合包内置，无需单独配置"
+    return ""
 
 
 def _default_genie_onnx_dir(base_dir: Path, profile: CharacterProfile | None) -> Path:

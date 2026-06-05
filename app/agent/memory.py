@@ -179,11 +179,19 @@ class MemoryStore:
             self._reload_generation += 1
             generation = self._reload_generation
             self._reload_error = ""
+            existing_memory = self._memory
+            reload_llm_only = self._supports_memory_llm_reload(existing_memory)
 
         if wait:
             try:
                 self._publish_status("reloading", "长期记忆系统正在根据新的 API 设置重载。")
-                memory = self._create_memory_client(api_settings)
+                if reload_llm_only:
+                    llm_config, llm = self._create_memory_llm(api_settings)
+                    memory = existing_memory
+                else:
+                    llm_config = None
+                    llm = None
+                    memory = self._create_memory_client(api_settings)
             except Exception as exc:
                 logger.exception("mem0 后台重载失败")
                 current_generation = False
@@ -197,8 +205,14 @@ class MemoryStore:
             applied = False
             with self._lock:
                 if generation == self._reload_generation:
-                    self._memory = memory
+                    if reload_llm_only and self._memory is not existing_memory:
+                        return
+                    if reload_llm_only:
+                        self._apply_memory_llm(memory, llm_config, llm)
+                    else:
+                        self._memory = memory
                     self._load_error = ""
+                    self._reload_error = ""
                     self._loading = False
                     self._reloading = False
                     applied = True
@@ -216,7 +230,13 @@ class MemoryStore:
 
         def reload() -> None:
             try:
-                memory = self._create_memory_client(api_settings)
+                if reload_llm_only:
+                    llm_config, llm = self._create_memory_llm(api_settings)
+                    memory = existing_memory
+                else:
+                    llm_config = None
+                    llm = None
+                    memory = self._create_memory_client(api_settings)
             except Exception as exc:
                 logger.exception("mem0 后台重载失败")
                 current_generation = False
@@ -232,7 +252,12 @@ class MemoryStore:
             with self._lock:
                 if generation != self._reload_generation:
                     return
-                self._memory = memory
+                if reload_llm_only and self._memory is not existing_memory:
+                    return
+                if reload_llm_only:
+                    self._apply_memory_llm(memory, llm_config, llm)
+                else:
+                    self._memory = memory
                 self._load_error = ""
                 self._reload_error = ""
                 self._loading = False
@@ -475,6 +500,34 @@ class MemoryStore:
             from mem0 import Memory
 
             return Memory.from_config(self.build_mem0_config(api_settings))
+
+    def _supports_memory_llm_reload(self, memory: Any | None) -> bool:
+        if memory is None:
+            return False
+        config = getattr(memory, "config", None)
+        return hasattr(memory, "llm") and hasattr(config, "llm")
+
+    def _create_memory_llm(self, api_settings: "ApiSettings") -> tuple[Any, Any]:
+        """只按新 API 设置重建 mem0 的 LLM，避免重开本地 Qdrant 客户端。"""
+
+        with _MEM0_CREATE_LOCK:
+            install_mem0_vendor()
+            from mem0.llms.configs import LlmConfig
+            from mem0.utils.factory import LlmFactory
+
+            llm_section = self.build_mem0_config(api_settings)["llm"]
+            llm_config = LlmConfig(
+                provider=llm_section["provider"],
+                config=dict(llm_section.get("config") or {}),
+            )
+            llm = LlmFactory.create(llm_config.provider, llm_config.config)
+            return llm_config, llm
+
+    def _apply_memory_llm(self, memory: Any, llm_config: Any, llm: Any) -> None:
+        if memory is None or llm_config is None or llm is None:
+            return
+        memory.config.llm = llm_config
+        memory.llm = llm
 
     def _set_status_locked(
         self,
