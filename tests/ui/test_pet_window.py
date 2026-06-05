@@ -182,20 +182,28 @@ def test_memory_status_does_not_use_tray_balloon(monkeypatch) -> None:  # type: 
             self.messages.append(message)
 
     single_shots: list[tuple[int, object]] = []
+    warnings: list[tuple[str, str]] = []
     monkeypatch.setattr(
         pet_window_module.QTimer,
         "singleShot",
         lambda delay, callback: single_shots.append((delay, callback)),
     )
+    monkeypatch.setattr(
+        pet_window_module,
+        "show_themed_warning",
+        lambda _parent, title, text, **_kwargs: warnings.append((title, text)),
+    )
     window = type("WindowStub", (), {})()
     window.memory_status_message_active = False
     window.memory_status_last_message = ""
+    window.memory_failure_dialog_last_message = ""
     window.startup_initializing = False
     window.active_interaction_id = None
     window.reply_history_review_active = False
     window.subtitle_controller = SubtitleControllerStub()
     window.tray_icon = TrayIconStub()
     window._restore_memory_status_speech = lambda: None
+    window._show_memory_failure_dialog = lambda message: PetWindow._show_memory_failure_dialog(window, message)
 
     for status in ("loading", "reloading", "failed"):
         PetWindow._show_memory_status_message(window, status, f"{status} message")
@@ -207,6 +215,7 @@ def test_memory_status_does_not_use_tray_balloon(monkeypatch) -> None:  # type: 
         "reloading message",
         "failed message",
     ]
+    assert warnings == [("记忆模型下载失败", "failed message")]
     assert single_shots == [(pet_window_module.MEMORY_STATUS_DISPLAY_MS, window._restore_memory_status_speech)]
 
 
@@ -2540,7 +2549,7 @@ def test_settings_dialog_shows_memory_dependency_download_hint() -> None:
         memory_store=memory_store,  # type: ignore[arg-type]
     )
 
-    expected = "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。"
+    expected = "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。"
     assert dialog.memory_status_label.text() == expected
     assert dialog.memory_table.item(0, 1).text() == expected
     assert _process_events_until(app, lambda: memory_store.list_calls == 1)
@@ -3407,7 +3416,7 @@ def test_history_clear_reports_when_memory_store_is_not_ready(monkeypatch) -> No
             self.history_store = HistoryStoreStub()
             self.memory_store = MemoryStoreStub()
             self.history_window = HistoryWindowStub()
-            self.memory_status_last_message = "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。"
+            self.memory_status_last_message = "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。"
             self.start_calls = 0
 
         def _start_memory_curation(self, *_args, **_kwargs) -> None:
@@ -3424,7 +3433,7 @@ def test_history_clear_reports_when_memory_store_is_not_ready(monkeypatch) -> No
 
     assert window.start_calls == 0
     assert window.history_window.busy_calls == [False]
-    assert messages == [("记忆初始化中", "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。")]
+    assert messages == [("记忆初始化中", "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。")]
 
 
 def test_show_settings_reloads_memory_in_background_when_api_changes(monkeypatch) -> None:  # type: ignore[no-untyped-def]

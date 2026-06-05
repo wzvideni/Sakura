@@ -17,15 +17,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-os.environ.setdefault("MEM0_TELEMETRY", "False")
-
 MEM0_VENDOR_ROOT = Path(__file__).resolve().parents[2] / "third_party" / "mem0"
 DEFAULT_MEMORY_SCOPE = "sakura"
 DEFAULT_COLLECTION_NAME = "sakura_memories"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_EMBEDDING_DIMS = 384
 DEFAULT_MEMORY_LIMIT = 20
+DEFAULT_HUGGINGFACE_ENDPOINT = "https://hf-mirror.com"
 _MEM0_CREATE_LOCK = threading.Lock()
+os.environ.setdefault("MEM0_TELEMETRY", "False")
+if not (os.environ.get("HF_ENDPOINT") or "").strip():
+    os.environ["HF_ENDPOINT"] = DEFAULT_HUGGINGFACE_ENDPOINT
 DEFAULT_MEMORY_LANGUAGE_INSTRUCTIONS = (
     "Sakura 的长期记忆必须使用简体中文记录。"
     "无论用户或助手消息使用什么语言，都要把可记忆事实翻译、归纳为自然的简体中文；"
@@ -154,6 +156,11 @@ class MemoryStore:
         """返回首次初始化是否可能需要下载本地嵌入模型。"""
 
         return not _embedding_model_cached(DEFAULT_EMBEDDING_MODEL, self.base_dir)
+
+    def embedding_model_endpoint(self) -> str:
+        """返回当前嵌入模型下载端点，便于 UI 提示用户。"""
+
+        return _huggingface_endpoint()
 
     def preload(self, *, wait: bool = False) -> None:
         """提前启动 mem0 加载，避免首次打开设置或聊天时才初始化。"""
@@ -343,7 +350,12 @@ class MemoryStore:
     ) -> dict[str, Any]:
         query = _optional_text(arguments, "query") or _optional_text(arguments, "keyword")
         limit = _positive_int(arguments.get("limit") or arguments.get("top_k"), DEFAULT_MEMORY_LIMIT)
-        mem = self._get_memory(wait=wait)
+        try:
+            mem = self._get_memory(wait=wait)
+        except RuntimeError as exc:
+            if wait:
+                raise
+            return self._failed_response(str(exc))
         if mem is None:
             return self._loading_response()
         raw = (
@@ -368,7 +380,12 @@ class MemoryStore:
     ) -> dict[str, Any]:
         _ = allow_sensitive
         content = _required_text(arguments, "content")
-        mem = self._get_memory(wait=wait)
+        try:
+            mem = self._get_memory(wait=wait)
+        except RuntimeError as exc:
+            if wait:
+                raise
+            return self._failed_response(str(exc))
         if mem is None:
             return self._loading_response()
         metadata = _memory_metadata(arguments)
@@ -404,7 +421,12 @@ class MemoryStore:
 
     def forget_memory(self, arguments: dict[str, Any], *, wait: bool = True) -> dict[str, Any]:
         memory_id = _required_text(arguments, "id")
-        mem = self._get_memory(wait=wait)
+        try:
+            mem = self._get_memory(wait=wait)
+        except RuntimeError as exc:
+            if wait:
+                raise
+            return self._failed_response(str(exc))
         if mem is None:
             return self._loading_response()
         previous = _normalize_memory_record(mem.get(memory_id))
@@ -463,7 +485,7 @@ class MemoryStore:
         status_event = (
             self._set_status_locked(
                 "loading",
-                "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。",
+                "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。",
             )
             if report_dependency_loading
             else None
@@ -474,12 +496,16 @@ class MemoryStore:
                 mem = self._create_memory_client(api_settings)
             except Exception as exc:
                 logger.exception("mem0 初始化失败")
+                error_message = _format_memory_load_error(
+                    exc,
+                    embedding_download=report_dependency_loading,
+                )
                 with self._lock:
                     if generation == self._reload_generation:
-                        self._load_error = str(exc)
+                        self._load_error = error_message
                         self._loading = False
                 if report_dependency_loading:
-                    self._publish_status("failed", f"长期记忆系统初始化失败：{exc}")
+                    self._publish_status("failed", error_message)
                 return
             with self._lock:
                 if generation != self._reload_generation or self.api_settings != api_settings:
@@ -575,6 +601,17 @@ class MemoryStore:
             "memories": [],
         }
 
+    def _failed_response(self, error: str) -> dict[str, Any]:
+        return {
+            "status": "failed",
+            "message": (
+                "长期记忆系统暂时不可用。请告诉主人普通聊天仍可继续，"
+                "不要重复调用记忆工具。"
+            ),
+            "error": error,
+            "memories": [],
+        }
+
 
 def _resolve_base_dir(base_dir: Path | None) -> Path:
     if base_dir is None:
@@ -591,12 +628,12 @@ def _normalize_scope_id(scope_id: str | None) -> str:
 
 
 def _local_embedding_model_kwargs(model_name: str, base_dir: Path | None = None) -> dict[str, Any]:
-    """本地已有 HuggingFace 缓存时禁止联网探测，避免设置页反复卡顿。"""
+    """优先复用本地模型；缺失时下载到项目缓存并使用 HuggingFace 镜像。"""
 
     cache_folder = _embedding_model_cache_folder(model_name, base_dir)
-    if cache_folder is None:
-        return {}
-    return {"cache_folder": str(cache_folder), "local_files_only": True}
+    if cache_folder is not None:
+        return {"cache_folder": str(cache_folder), "local_files_only": True}
+    return {"cache_folder": str(_project_embedding_cache_folder(base_dir))}
 
 
 def _embedding_model_cached(model_name: str, base_dir: Path | None = None) -> bool:
@@ -643,6 +680,29 @@ def _embedding_model_cache_candidates(base_dir: Path | None = None) -> list[Path
     default_hf_home = Path(hf_home) if hf_home else Path.home() / ".cache" / "huggingface"
     add_candidate(default_hf_home / "hub")
     return cache_candidates
+
+
+def _project_embedding_cache_folder(base_dir: Path | None = None) -> Path:
+    """返回 Sakura 自己管理的 HuggingFace hub 缓存目录。"""
+
+    root = _resolve_base_dir(base_dir)
+    return root / "runtime" / "hf-cache" / "hub"
+
+
+def _huggingface_endpoint() -> str:
+    return (os.environ.get("HF_ENDPOINT") or DEFAULT_HUGGINGFACE_ENDPOINT).strip()
+
+
+def _format_memory_load_error(exc: Exception, *, embedding_download: bool) -> str:
+    raw_message = str(exc).strip() or exc.__class__.__name__
+    if not embedding_download:
+        return f"长期记忆系统初始化失败：{raw_message}"
+    endpoint = _huggingface_endpoint()
+    return (
+        "长期记忆系统初始化失败：本地嵌入模型下载失败，可能是网络无法访问 HuggingFace "
+        f"镜像（当前端点：{endpoint}）。请检查网络或代理后重试；普通聊天仍可继续。"
+        f"\n\n原始错误：{raw_message}"
+    )
 
 
 def _hub_snapshot_has_model_weights(snapshot_dir: Path) -> bool:
