@@ -116,7 +116,7 @@ from sdk.types import SettingsPanelContribution, ToolsTabContribution
 
 
 MEMORY_READING_TEXT = "正在读取长期记忆..."
-MEMORY_DEPENDENCY_LOADING_TEXT = "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。"
+MEMORY_DEPENDENCY_LOADING_TEXT = "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。"
 
 
 class ApiConnectionTestWorker(QObject):

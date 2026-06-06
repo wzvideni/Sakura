@@ -2755,7 +2755,7 @@ def test_settings_dialog_shows_memory_dependency_download_hint() -> None:
         memory_store=memory_store,  # type: ignore[arg-type]
     )
 
-    expected = "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。"
+    expected = "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。"
     assert dialog.memory_status_label.text() == expected
     assert dialog.memory_table.item(0, 1).text() == expected
     assert _process_events_until(app, lambda: memory_store.list_calls == 1)
@@ -3625,7 +3625,7 @@ def test_history_clear_reports_when_memory_store_is_not_ready(monkeypatch) -> No
             self.history_store = HistoryStoreStub()
             self.memory_store = MemoryStoreStub()
             self.history_window = HistoryWindowStub()
-            self.memory_status_last_message = "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。"
+            self.memory_status_last_message = "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。"
             self.start_calls = 0
 
         def _start_memory_curation(self, *_args, **_kwargs) -> None:
@@ -3642,7 +3642,7 @@ def test_history_clear_reports_when_memory_store_is_not_ready(monkeypatch) -> No
 
     assert window.start_calls == 0
     assert window.history_window.busy_calls == [False]
-    assert messages == [("记忆初始化中", "长期记忆系统正在初始化，首次启动会从 HuggingFace 镜像下载本地嵌入模型，请稍等。")]
+    assert messages == [("记忆初始化中", "长期记忆系统正在初始化，首次启动可能需要下载本地嵌入模型，请稍等。")]
 
 
 def test_history_clear_resets_mem0_curation_cache_before_start() -> None:  # type: ignore[no-untyped-def]
