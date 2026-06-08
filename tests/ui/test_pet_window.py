@@ -195,14 +195,23 @@ def test_memory_status_does_not_use_tray_balloon(monkeypatch) -> None:  # type: 
     )
     window = type("WindowStub", (), {})()
     window.memory_status_message_active = False
+    window.memory_status_last_status = ""
     window.memory_status_last_message = ""
     window.memory_failure_dialog_last_message = ""
+    window.memory_failure_dialog_pending_message = ""
     window.startup_initializing = False
     window.active_interaction_id = None
     window.reply_history_review_active = False
     window.subtitle_controller = SubtitleControllerStub()
     window.tray_icon = TrayIconStub()
+    window.isVisible = lambda: True
     window._restore_memory_status_speech = lambda: None
+    window._should_defer_memory_failure_dialog = (
+        lambda: PetWindow._should_defer_memory_failure_dialog(window)
+    )
+    window._display_memory_failure_dialog = (
+        lambda message: PetWindow._display_memory_failure_dialog(window, message)
+    )
     window._show_memory_failure_dialog = lambda message: PetWindow._show_memory_failure_dialog(window, message)
 
     for status in ("loading", "reloading", "failed"):
@@ -217,6 +226,61 @@ def test_memory_status_does_not_use_tray_balloon(monkeypatch) -> None:  # type: 
     ]
     assert warnings == [("记忆模型下载失败", "failed message")]
     assert single_shots == [(pet_window_module.MEMORY_STATUS_DISPLAY_MS, window._restore_memory_status_speech)]
+
+
+def test_memory_failure_dialog_is_deferred_until_startup_window_is_visible(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    class SubtitleControllerStub:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def show_text_immediately(self, message: str) -> None:
+            self.messages.append(message)
+
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        pet_window_module,
+        "show_themed_warning",
+        lambda _parent, title, text, **_kwargs: warnings.append((title, text)),
+    )
+    window = type("WindowStub", (), {})()
+    window.memory_status_message_active = False
+    window.memory_status_last_status = ""
+    window.memory_status_last_message = ""
+    window.memory_failure_dialog_last_message = ""
+    window.memory_failure_dialog_pending_message = ""
+    window.startup_initializing = True
+    window.active_interaction_id = None
+    window.reply_history_review_active = False
+    window.subtitle_controller = SubtitleControllerStub()
+    visible = {"value": False}
+    window.isVisible = lambda: visible["value"]
+    window._should_defer_memory_failure_dialog = (
+        lambda: PetWindow._should_defer_memory_failure_dialog(window)
+    )
+    window._display_memory_failure_dialog = (
+        lambda message: PetWindow._display_memory_failure_dialog(window, message)
+    )
+    window._show_memory_failure_dialog = lambda message: PetWindow._show_memory_failure_dialog(window, message)
+    window._show_pending_memory_failure_dialog = (
+        lambda: PetWindow._show_pending_memory_failure_dialog(window)
+    )
+
+    PetWindow._show_memory_status_message(window, "failed", "download failed")
+
+    assert warnings == []
+    assert window.subtitle_controller.messages == []
+    assert window.memory_failure_dialog_pending_message == "download failed"
+
+    window.startup_initializing = False
+    visible["value"] = True
+    PetWindow._show_pending_memory_status_after_startup(window)
+
+    assert window.subtitle_controller.messages == ["download failed"]
+    assert warnings == [("记忆模型下载失败", "download failed")]
+    assert window.memory_failure_dialog_pending_message == ""
 
 
 def test_message_box_stylesheet_contains_configured_theme_colors() -> None:
@@ -1259,7 +1323,7 @@ def test_pet_window_syncs_plugin_chat_ui_widgets() -> None:
     app.processEvents()
 
 
-def test_settings_dialog_marks_windows_mcp_as_unavailable() -> None:
+def test_settings_dialog_exposes_experimental_windows_mcp_restart_setting() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
     if not hasattr(qtwidgets, "QApplication"):
@@ -1280,20 +1344,22 @@ def test_settings_dialog_marks_windows_mcp_as_unavailable() -> None:
         base_dir=root,
         **_settings_dialog_character_kwargs(root),
         proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
-        mcp_settings=MCPRuntimeSettings(windows_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
     )
 
     labels = [label.text() for label in dialog.findChildren(qtwidgets.QLabel)]
 
     assert not dialog.windows_mcp_enabled_check.isChecked()
-    assert not dialog.windows_mcp_enabled_check.isEnabled()
-    assert any("待测试，未开放" in text for text in labels)
+    assert dialog.windows_mcp_enabled_check.isEnabled()
+    assert "实验性" in dialog.windows_mcp_enabled_check.text()
+    assert "实验性功能" in dialog.windows_mcp_enabled_check.toolTip()
+    assert any("实验性功能" in text for text in labels)
     assert any("重启 Sakura" in text for text in labels)
 
     dialog.windows_mcp_enabled_check.setChecked(True)
     dialog.accept()
 
-    assert dialog.result_mcp_settings == MCPRuntimeSettings(windows_enabled=False)
+    assert dialog.result_mcp_settings == MCPRuntimeSettings(windows_enabled=True)
     dialog.deleteLater()
     app.processEvents()
 
@@ -1810,7 +1876,7 @@ def test_settings_dialog_disables_tts_when_selected_character_has_no_voice(monke
     app.processEvents()
 
 
-def test_settings_dialog_tts_test_failure_disables_tts_and_saves(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_settings_dialog_tts_test_failure_keeps_enabled_settings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
     if not hasattr(qtwidgets, "QApplication"):
@@ -1825,6 +1891,8 @@ def test_settings_dialog_tts_test_failure_disables_tts_and_saves(monkeypatch) ->
     root = _ui_runtime_root("tts_save_failure")
     current_profile = _build_settings_dialog_character(root, "sakura", "Sakura")
     _build_settings_dialog_character(root, "nanami", "Nanami")
+    work_dir = root / "tts" / "g50"
+    work_dir.mkdir(parents=True, exist_ok=True)
     dialog = SettingsDialog(
         api_settings=ApiSettings(
             base_url="https://api.example.com/v1",
@@ -1839,6 +1907,8 @@ def test_settings_dialog_tts_test_failure_disables_tts_and_saves(monkeypatch) ->
         mcp_settings=MCPRuntimeSettings(windows_enabled=False),
     )
     dialog.tts_enabled_check.setChecked(True)
+    dialog.tts_provider_combo.setCurrentIndex(dialog.tts_provider_combo.findData("gpt-sovits"))
+    dialog.tts_work_dir_edit.setText(str(work_dir))
     nanami_index = dialog.character_combo.findData("nanami")
     assert nanami_index >= 0
     dialog.character_combo.setCurrentIndex(nanami_index)
@@ -1858,9 +1928,12 @@ def test_settings_dialog_tts_test_failure_disables_tts_and_saves(monkeypatch) ->
     dialog.accept()
 
     assert warnings and "服务启动失败" in warnings[0]
-    assert not dialog.tts_enabled_check.isChecked()
+    assert "TTS 设置已保留" in warnings[0]
+    assert dialog.tts_enabled_check.isChecked()
     assert dialog.result_tts_settings is not None
-    assert not dialog.result_tts_settings.enabled
+    assert dialog.result_tts_settings.enabled
+    assert dialog.result_tts_settings.provider == "gpt-sovits"
+    assert dialog.result_tts_settings.work_dir == work_dir
     dialog.deleteLater()
     app.processEvents()
 
@@ -3460,6 +3533,57 @@ def test_show_settings_applies_launch_at_login_change(monkeypatch) -> None:  # t
     assert applied == [(Path("."), True)]
     assert saved_startup_settings == [StartupSettings(launch_at_login=True)]
     assert window.startup_settings == StartupSettings(launch_at_login=True)
+
+
+def test_show_settings_reuses_active_dialog_from_tray(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    api_settings = ApiSettings("https://api.example.com/v1", "test-key", "test-model")
+    tts_settings = _minimal_tts_settings()
+    events: list[str] = []
+
+    class SettingsServiceStub:
+        def load_tts_settings(self, **_kwargs):  # type: ignore[no-untyped-def]
+            events.append("load_tts")
+            return tts_settings
+
+    class ApiClientStub:
+        settings = api_settings
+
+    class MemoryStoreStub:
+        pass
+
+    class DialogStub:
+        def __init__(self, *_args, **_kwargs) -> None:
+            events.append("dialog_init")
+
+        def show(self) -> None:
+            events.append("show")
+
+        def raise_(self) -> None:
+            events.append("raise")
+
+        def activateWindow(self) -> None:
+            events.append("activate")
+
+        def exec(self):  # type: ignore[no-untyped-def]
+            events.append("exec")
+            window.show_settings()
+            return pet_window_module.QDialog.DialogCode.Rejected
+
+    window = _minimal_settings_window(
+        PetWindow,
+        SettingsServiceStub(),
+        ApiClientStub(),
+        MemoryStoreStub(),
+    )
+    monkeypatch.setattr(pet_window_module, "SettingsDialog", DialogStub)
+
+    window.show_settings()
+
+    assert events == ["load_tts", "dialog_init", "exec", "show", "raise", "activate"]
+    assert getattr(window, "settings_dialog", None) is None
 
 
 def test_show_settings_saves_and_applies_subtitle_display_speed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -6325,6 +6449,7 @@ def _minimal_settings_window(pet_window_cls, settings_service, api_client, memor
 
     class MinimalSettingsWindow:
         show_settings = pet_window_cls.show_settings
+        _activate_settings_dialog = pet_window_cls._activate_settings_dialog
         _retire_tts_provider = pet_window_cls._retire_tts_provider
         _apply_subtitle_display_speed = pet_window_cls._apply_subtitle_display_speed
         _apply_launch_at_login_settings = pet_window_cls._apply_launch_at_login_settings

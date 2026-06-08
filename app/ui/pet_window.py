@@ -341,6 +341,7 @@ class PetWindow(QWidget):
         self.tool_registry.set_free_access_enabled(self.free_access_enabled)
         self.always_on_top_enabled = self._load_always_on_top_enabled()
         self.history_window: HistoryWindow | None = None
+        self.settings_dialog: SettingsDialog | None = None
         self.messages: list[dict[str, Any]] = []
         self.worker_thread: QThread | None = None
         self.worker: ChatWorker | EventWorker | None = None
@@ -373,8 +374,10 @@ class PetWindow(QWidget):
         self.active_event_type = ""
         self.active_event: AgentEvent | None = None
         self.memory_status_message_active = False
+        self.memory_status_last_status = ""
         self.memory_status_last_message = ""
         self.memory_failure_dialog_last_message = ""
+        self.memory_failure_dialog_pending_message = ""
         self.last_user_activity_at = time.perf_counter()
         self.last_proactive_care_at: float | None = None
         self.last_proactive_screen_context_at: float | None = None
@@ -631,6 +634,8 @@ class PetWindow(QWidget):
         super().showEvent(event)
         self._refresh_tray_menu()
         self._schedule_native_topmost_sync()
+        if getattr(self, "memory_failure_dialog_pending_message", ""):
+            QTimer.singleShot(0, self._show_pending_memory_failure_dialog)
 
     def hideEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().hideEvent(event)
@@ -2414,6 +2419,7 @@ class PetWindow(QWidget):
 
     def _show_memory_status_message(self, status: str, message: str) -> None:
         self.memory_status_message_active = True
+        self.memory_status_last_status = status
         self.memory_status_last_message = message
         if status == "failed":
             self._show_memory_failure_dialog(message)
@@ -2427,6 +2433,23 @@ class PetWindow(QWidget):
     def _show_memory_failure_dialog(self, message: str) -> None:
         if getattr(self, "memory_failure_dialog_last_message", "") == message:
             return
+        if self._should_defer_memory_failure_dialog():
+            self.memory_failure_dialog_pending_message = message
+            return
+        self._display_memory_failure_dialog(message)
+
+    def _should_defer_memory_failure_dialog(self) -> bool:
+        if getattr(self, "startup_initializing", False):
+            return True
+        is_visible = getattr(self, "isVisible", None)
+        if callable(is_visible):
+            return not bool(is_visible())
+        return False
+
+    def _display_memory_failure_dialog(self, message: str) -> None:
+        if getattr(self, "memory_failure_dialog_last_message", "") == message:
+            return
+        self.memory_failure_dialog_pending_message = ""
         self.memory_failure_dialog_last_message = message
         show_themed_warning(self, "记忆模型下载失败", message)
 
@@ -2441,9 +2464,25 @@ class PetWindow(QWidget):
         ):
             return
         self.subtitle_controller.show_text_immediately(self.memory_status_last_message)
+        self._show_pending_memory_failure_dialog()
+
+    @Slot()
+    def _show_pending_memory_failure_dialog(self) -> None:
+        message = getattr(self, "memory_failure_dialog_pending_message", "")
+        if (
+            not message
+            or getattr(self, "startup_initializing", False)
+            or getattr(self, "memory_status_last_status", "") != "failed"
+        ):
+            return
+        if self._should_defer_memory_failure_dialog():
+            return
+        self._display_memory_failure_dialog(message)
 
     def _show_memory_ready_message(self, message: str) -> None:
         _ = message
+        self.memory_status_last_status = "ready"
+        self.memory_failure_dialog_pending_message = ""
         if not self.memory_status_message_active:
             return
         self.memory_status_message_active = False
@@ -2589,6 +2628,10 @@ class PetWindow(QWidget):
     def show_settings(self) -> None:
         if getattr(self, "startup_initializing", False):
             return
+        active_dialog = getattr(self, "settings_dialog", None)
+        if active_dialog is not None:
+            self._activate_settings_dialog(active_dialog)
+            return
         try:
             tts_settings = self.settings_service.load_tts_settings(
                 validate_enabled=False,
@@ -2617,7 +2660,13 @@ class PetWindow(QWidget):
             theme_settings=getattr(self, "theme_settings", DEFAULT_THEME_SETTINGS),
             startup_settings=getattr(self, "startup_settings", StartupSettings()),
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        self.settings_dialog = dialog
+        try:
+            dialog_result = dialog.exec()
+        finally:
+            if getattr(self, "settings_dialog", None) is dialog:
+                self.settings_dialog = None
+        if dialog_result != QDialog.DialogCode.Accepted:
             return
         result_subtitle_typing_interval_ms = getattr(
             dialog,
@@ -2762,6 +2811,19 @@ class PetWindow(QWidget):
         if getattr(dialog, "result_plugin_config_changed", False):
             message += "\n\n插件启用状态需要重启 Sakura 后才会生效。"
         show_themed_information(self, "保存成功", message)
+
+    def _activate_settings_dialog(self, dialog: SettingsDialog) -> None:
+        """重复打开设置时激活已有窗口，避免托盘菜单创建多个设置页。"""
+
+        show = getattr(dialog, "show", None)
+        if callable(show):
+            show()
+        raise_window = getattr(dialog, "raise_", None)
+        if callable(raise_window):
+            raise_window()
+        activate_window = getattr(dialog, "activateWindow", None)
+        if callable(activate_window):
+            activate_window()
 
     @Slot(bool)
     def _toggle_chinese_subtitles(self, checked: bool) -> None:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -41,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.agent.memory import MemoryStore
-from app.agent.mcp import MCPRuntimeSettings, WINDOWS_MCP_UNAVAILABLE_TEXT
+from app.agent.mcp import MCPRuntimeSettings, WINDOWS_MCP_EXPERIMENTAL_TEXT
 from app.core.debug_log import debug_log
 from app.config.character_archive import (
     CharacterArchiveError,
@@ -887,13 +886,12 @@ class SettingsDialog(QDialog):
         tools_tab_contributions: list[ToolsTabContribution],
     ) -> QWidget:
         tab = QWidget(self)
-        self.windows_mcp_enabled_check = QCheckBox("启用 Windows MCP 桌面控制（高级）", tab)
-        self.windows_mcp_enabled_check.setChecked(False)
-        self.windows_mcp_enabled_check.setEnabled(False)
-        self.windows_mcp_enabled_check.setToolTip(WINDOWS_MCP_UNAVAILABLE_TEXT)
+        self.windows_mcp_enabled_check = QCheckBox("启用 Windows MCP 桌面控制（实验性）", tab)
+        self.windows_mcp_enabled_check.setChecked(settings.windows_enabled)
+        self.windows_mcp_enabled_check.setToolTip(WINDOWS_MCP_EXPERIMENTAL_TEXT)
 
         restart_hint = QLabel(
-            f"{WINDOWS_MCP_UNAVAILABLE_TEXT}。保存后需要重启 Sakura 才会加载或卸载 Windows MCP 工具。",
+            f"{WINDOWS_MCP_EXPERIMENTAL_TEXT}。保存后需要重启 Sakura 才会加载或卸载 Windows MCP 工具。",
             tab,
         )
         restart_hint.setWordWrap(True)
@@ -1996,7 +1994,9 @@ class SettingsDialog(QDialog):
                 cooldown_minutes=self.proactive_cooldown_spin.value(),
                 screen_context_batch_limit=self.proactive_batch_limit_spin.value(),
             ),
-            "mcp_settings": MCPRuntimeSettings(windows_enabled=False),
+            "mcp_settings": MCPRuntimeSettings(
+                windows_enabled=self.windows_mcp_enabled_check.isChecked(),
+            ),
             "debug_log_settings": DebugLogSettings(
                 enabled=self.debug_log_enabled_check.isChecked(),
                 body_enabled=(
@@ -2311,10 +2311,9 @@ class SettingsDialog(QDialog):
         QMessageBox.warning(
             self,
             "TTS 检测失败",
-            f"{message}\n\n已自动关闭 TTS，并继续保存其他设置。",
+            f"{message}\n\nTTS 设置已保留并继续保存。若保存后仍无法发声，请重启本地 TTS 服务或确认工作目录有效。",
         )
-        self.tts_enabled_check.setChecked(False)
-        accept_values["tts_settings"] = replace(original_settings, enabled=False)
+        accept_values["tts_settings"] = original_settings
         self._complete_accept(accept_values)
 
     @Slot()
