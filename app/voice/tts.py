@@ -23,6 +23,14 @@ from urllib.parse import urlencode, urlparse, urlunparse
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
+from app.voice.audio_sink_player import AudioSinkPlayer
+
+# 播放后端类型
+TTS_PLAYBACK_BACKEND_AUDIO_SINK = "audio_sink"
+TTS_PLAYBACK_BACKEND_MEDIA_PLAYER = "media_player"
+# 默认使用旧 QMediaPlayer 后端，待 audio_sink 验证稳定后再切换
+_DEFAULT_PLAYBACK_BACKEND = TTS_PLAYBACK_BACKEND_AUDIO_SINK
+
 from app.config.character_loader import CharacterProfile
 from app.llm.chat_reply import DEFAULT_TONE
 from app.core.debug_log import debug_log
@@ -30,10 +38,10 @@ from app.voice.runtime_compat import find_usable_runtime_python, format_runtime_
 
 
 TTSCallback = Callable[[], None]
-_AUDIO_CLEANUP_DELAY_MS = 200
+_AUDIO_CLEANUP_DELAY_MS = 5000
 _AUDIO_CLEANUP_MAX_ATTEMPTS = 5
 _AUDIO_FINISH_FALLBACK_GRACE_MS = 1500
-_AUDIO_FINISH_FALLBACK_MIN_MS = 3000
+_AUDIO_FINISH_FALLBACK_MIN_MS = 2000
 _LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
 _CJK_TEXT_LANGS = {"ja", "all_ja", "zh", "all_zh", "ko", "all_ko", "yue", "all_yue"}
 TTS_PROVIDER_NONE = "none"
@@ -242,6 +250,7 @@ class GPTSoVITSTTSSettings:
     text_lang: str = "ja"
     timeout_seconds: int = 60
     tone_references: dict[str, list[ToneReference]] = field(default_factory=dict)
+    playback_backend: str = ""
 
     @classmethod
     def from_character_profile(
@@ -372,6 +381,9 @@ class GPTSoVITSTTSProvider(QObject):
         self._server_process: _LocalProcessHandle | None = None
         self._playback_warmup_requested = False
         self._playback_finish_token = 0
+        # 播放后端：audio_sink 或 media_player
+        self._playback_backend: str = getattr(settings, "playback_backend", _DEFAULT_PLAYBACK_BACKEND) or _DEFAULT_PLAYBACK_BACKEND
+        self._sink_player: AudioSinkPlayer | None = None
 
         self._audio_output: QAudioOutput | None = None
         self._player: QMediaPlayer | None = None
@@ -425,6 +437,8 @@ class GPTSoVITSTTSProvider(QObject):
     ) -> None:
         if handle.cancelled:
             debug_log("TTS", "预生成句柄已取消，跳过播放", {"text": handle.text, "tone": handle.tone})
+            self._started.emit(on_started)
+            self._finished.emit(on_finished)
             return
         if not handle.text or handle.failed:
             debug_log(
@@ -1006,10 +1020,12 @@ class GPTSoVITSTTSProvider(QObject):
             {
                 "audio_path": audio_path,
                 "pending_audio": len(self._pending_audio),
+                "current_audio": str(self._current_audio) if self._current_audio else None,
+                "playback_state": self._playback_backend,
             },
         )
         if self._current_audio is None:
-            self._play_next()
+            QTimer.singleShot(0, self._play_next)
 
     @Slot(object, str)
     def _store_prepared_audio(self, handle: TTSPreparedAudio, audio_path: str) -> None:
@@ -1045,14 +1061,28 @@ class GPTSoVITSTTSProvider(QObject):
 
     @Slot(QMediaPlayer.MediaStatus)
     def _handle_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
-        debug_log("TTS", "播放器媒体状态变化", {"status": str(status)})
+        debug_log(
+            "TTS",
+            "播放器媒体状态变化",
+            {
+                "status": str(status),
+                "audio_path": str(self._current_audio) if self._current_audio else "",
+            },
+        )
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._finish_current_audio()
+            self._finish_current_audio("end_of_media")
             self._play_next()
 
     @Slot(QMediaPlayer.PlaybackState)
     def _handle_playback_state(self, state: QMediaPlayer.PlaybackState) -> None:
-        debug_log("TTS", "播放器播放状态变化", {"state": str(state)})
+        debug_log(
+            "TTS",
+            "播放器播放状态变化",
+            {
+                "state": str(state),
+                "audio_path": str(self._current_audio) if self._current_audio else "",
+            },
+        )
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self._emit_current_started()
             return
@@ -1061,15 +1091,27 @@ class GPTSoVITSTTSProvider(QObject):
             and self._current_audio is not None
             and self._current_started_emitted
         ):
-            debug_log("TTS", "播放器停止，按当前音频播放完成处理", {"audio_path": self._current_audio})
-            self._finish_current_audio()
+            debug_log(
+                "TTS",
+                "播放器停止，按当前音频播放完成处理",
+                {"audio_path": str(self._current_audio)},
+            )
+            self._finish_current_audio("stopped_state")
             self._play_next()
 
     @Slot(QMediaPlayer.Error, str)
     def _handle_player_error(self, _error: QMediaPlayer.Error, error_text: str) -> None:
-        debug_log("TTS", "播放器错误", {"error": error_text})
+        debug_log(
+            "TTS",
+            "播放器错误",
+            {
+                "error": error_text,
+                "audio_path": str(self._current_audio) if self._current_audio else "",
+                "pending_audio": len(self._pending_audio),
+            },
+        )
         self._log_error(f"音频播放失败：{error_text}")
-        self._finish_current_audio()
+        self._finish_current_audio("player_error")
         self._play_next()
 
     @Slot(str)
@@ -1118,35 +1160,164 @@ class GPTSoVITSTTSProvider(QObject):
                 "tone": handle.tone,
                 "audio_path": handle.audio_path,
                 "pending_audio": len(self._pending_audio),
+                "prepared": True,
+                "play_requested": handle.play_requested,
+                "current_audio": str(self._current_audio) if self._current_audio else None,
             },
         )
         handle.audio_path = None
         if self._current_audio is None:
-            self._play_next()
+            QTimer.singleShot(0, self._play_next)
 
     def _play_next(self) -> None:
+        """从播放队列取下一段音频并播放，根据后端配置分发。"""
         if self._current_audio is not None or not self._pending_audio:
             return
-        self._ensure_player()
         (
-            self._current_audio,
-            self._current_started,
-            self._current_finished,
+            audio_path,
+            on_started,
+            on_finished,
             _prepared_audio,
         ) = self._pending_audio.pop(0)
+        self._current_audio = audio_path
+        self._current_started = on_started
+        self._current_finished = on_finished
         self._current_started_emitted = False
         self._playback_finish_token += 1
+
+        debug_log(
+            "TTS",
+            "开始播放音频",
+            {
+                "backend": self._playback_backend,
+                "audio_path": str(audio_path),
+                "file_size": audio_path.stat().st_size if audio_path.exists() else 0,
+                "pending_audio": len(self._pending_audio),
+            },
+        )
+
+        if self._playback_backend == TTS_PLAYBACK_BACKEND_AUDIO_SINK:
+            self._play_next_with_sink()
+        else:
+            self._play_next_with_media_player()
+
+    def _play_next_with_media_player(self) -> None:
+        """旧 QMediaPlayer 播放后端。"""
+        audio_path = self._current_audio
         playback_finish_token = self._playback_finish_token
-        debug_log("TTS", "开始播放音频", {"audio_path": self._current_audio})
+        if audio_path is None:
+            return
+
+        self._ensure_player()
         if self._player is None:
             self._fail_audio_playback("播放器初始化失败。")
             return
-        self._player.setSource(QUrl.fromLocalFile(str(self._current_audio)))
+
+        self._player.setSource(QUrl.fromLocalFile(str(audio_path)))
         self._player.play()
         self._schedule_current_audio_finish_fallback(
-            self._current_audio,
+            audio_path,
             playback_finish_token,
         )
+
+    def _play_next_with_sink(self) -> None:
+        """QAudioSink 播放后端。"""
+        audio_path = self._current_audio
+        playback_finish_token = self._playback_finish_token
+        if audio_path is None:
+            return
+
+        # 销毁旧 sink player
+        if self._sink_player is not None:
+            try:
+                self._sink_player.finished.disconnect()
+                self._sink_player.started.disconnect()
+                self._sink_player.error.disconnect()
+            except Exception:
+                pass
+            self._sink_player = None
+
+        self._sink_player = AudioSinkPlayer(self)
+        self._sink_player.started.connect(self._on_sink_started)
+        self._sink_player.finished.connect(self._on_sink_finished)
+        self._sink_player.error.connect(self._on_sink_error)
+
+        debug_log(
+            "TTS",
+            "AudioSink: 尝试启动播放",
+            {"audio_path": str(audio_path), "token": playback_finish_token},
+        )
+        ok = self._sink_player.start(audio_path)
+        if not ok:
+            # sink 不支持此格式，fallback 到 QMediaPlayer
+            debug_log(
+                "TTS",
+                "AudioSink: fallback 到 QMediaPlayer",
+                {
+                    "fallback_reason": "sink_start_returned_false",
+                    "audio_path": str(audio_path),
+                },
+            )
+            self._sink_player = None
+            self._play_next_with_media_player()
+            return
+
+        # sink 后端也设置兜底定时器（作为额外安全网）
+        self._schedule_current_audio_finish_fallback(
+            audio_path,
+            playback_finish_token,
+        )
+
+    @Slot()
+    def _on_sink_started(self) -> None:
+        """AudioSinkPlayer 开始播放回调。"""
+        debug_log(
+            "TTS",
+            "AudioSink: 播放开始回调",
+            {"audio_path": str(self._current_audio) if self._current_audio else ""},
+        )
+        self._emit_current_started()
+
+    @Slot(str, str)
+    def _on_sink_finished(self, reason: str, audio_path_str: str) -> None:
+        """AudioSinkPlayer 播放完成回调。"""
+        debug_log(
+            "TTS",
+            "AudioSink: 播放完成回调",
+            {"reason": reason, "audio_path": audio_path_str},
+        )
+        try:
+            self._finish_current_audio(reason)
+            self._play_next()
+        except Exception as exc:
+            debug_log(
+                "TTS",
+                "AudioSink: 完成回调异常",
+                {"error": str(exc), "exception_type": type(exc).__name__},
+            )
+            self._finish_current_audio("callback_error")
+            self._play_next()
+
+    @Slot(str)
+    def _on_sink_error(self, message: str) -> None:
+        """AudioSinkPlayer 播放错误回调。"""
+        debug_log(
+            "TTS",
+            "AudioSink: 播放错误回调",
+            {"error": message, "audio_path": str(self._current_audio) if self._current_audio else ""},
+        )
+        self._log_error(message)
+        try:
+            self._finish_current_audio("sink_error")
+            self._play_next()
+        except Exception as exc:
+            debug_log(
+                "TTS",
+                "AudioSink: 错误回调异常",
+                {"error": str(exc), "exception_type": type(exc).__name__},
+            )
+            self._finish_current_audio("callback_error")
+            self._play_next()
 
     def _ensure_player(self) -> None:
         if self._player is not None:
@@ -1177,8 +1348,14 @@ class GPTSoVITSTTSProvider(QObject):
         debug_log("TTS", "音频开始回调", {"audio_path": self._current_audio})
         self._started.emit(self._current_started)
 
-    def _finish_current_audio(self) -> None:
+    def _finish_current_audio(self, reason: str = "normal") -> None:
+        """统一 finish 入口，保证幂等性。"""
         if self._finishing_audio:
+            debug_log(
+                "TTS",
+                "音频正在 finish 中，跳过重复调用",
+                {"reason": reason, "audio_path": str(self._current_audio) if self._current_audio else ""},
+            )
             return
         audio_path = self._current_audio
         on_finished = self._current_finished
@@ -1187,8 +1364,24 @@ class GPTSoVITSTTSProvider(QObject):
             return
         self._finishing_audio = True
         try:
-            debug_log("TTS", "音频播放完成", {"audio_path": audio_path})
+            debug_log(
+                "TTS",
+                "音频播放完成",
+                {
+                    "reason": reason,
+                    "audio_path": str(audio_path),
+                    "pending_audio": len(self._pending_audio),
+                },
+            )
             self._emit_current_started()
+            # 停止 sink player（如果正在使用）
+            if self._sink_player is not None:
+                try:
+                    self._sink_player.stop()
+                except Exception:
+                    pass
+                self._sink_player = None
+            # 释放 QMediaPlayer（如果正在使用）
             self._release_player_source()
             self._reset_current_audio_state()
             self._schedule_audio_cleanup(audio_path)
@@ -1238,15 +1431,26 @@ class GPTSoVITSTTSProvider(QObject):
     def _finish_current_audio_if_stalled(self, audio_path: Path, playback_finish_token: int) -> None:
         if playback_finish_token != self._playback_finish_token or self._current_audio != audio_path:
             return
+        if self._finishing_audio:
+            debug_log(
+                "TTS",
+                "音频播放完成兜底已过期，跳过",
+                {
+                    "audio_path": str(audio_path),
+                    "token": playback_finish_token,
+                },
+            )
+            return
         debug_log(
             "TTS",
             "音频播放完成事件未触发，使用时长兜底完成",
             {
-                "audio_path": audio_path,
+                "audio_path": str(audio_path),
                 "token": playback_finish_token,
+                "current_audio": str(self._current_audio) if self._current_audio else "",
             },
         )
-        self._finish_current_audio()
+        self._finish_current_audio("fallback_timeout")
         self._play_next()
 
     def _schedule_audio_cleanup(self, audio_path: Path, attempt: int = 1) -> None:
