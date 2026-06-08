@@ -3445,6 +3445,57 @@ def test_show_settings_does_not_save_or_reload_api_when_unchanged(monkeypatch) -
     assert calls == {"save_api": 0, "update_api": 0, "reload_memory": 0}
 
 
+def test_show_settings_reuses_active_dialog_from_tray(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+
+    api_settings = ApiSettings("https://api.example.com/v1", "test-key", "test-model")
+    tts_settings = _minimal_tts_settings()
+    events: list[str] = []
+
+    class SettingsServiceStub:
+        def load_tts_settings(self, **_kwargs):  # type: ignore[no-untyped-def]
+            events.append("load_tts")
+            return tts_settings
+
+    class ApiClientStub:
+        settings = api_settings
+
+    class MemoryStoreStub:
+        pass
+
+    class DialogStub:
+        def __init__(self, *_args, **_kwargs) -> None:
+            events.append("dialog_init")
+
+        def show(self) -> None:
+            events.append("show")
+
+        def raise_(self) -> None:
+            events.append("raise")
+
+        def activateWindow(self) -> None:
+            events.append("activate")
+
+        def exec(self):  # type: ignore[no-untyped-def]
+            events.append("exec")
+            window.show_settings()
+            return pet_window_module.QDialog.DialogCode.Rejected
+
+    window = _minimal_settings_window(
+        PetWindow,
+        SettingsServiceStub(),
+        ApiClientStub(),
+        MemoryStoreStub(),
+    )
+    monkeypatch.setattr(pet_window_module, "SettingsDialog", DialogStub)
+
+    window.show_settings()
+
+    assert events == ["load_tts", "dialog_init", "exec", "show", "raise", "activate"]
+    assert getattr(window, "settings_dialog", None) is None
+
+
 def test_show_settings_saves_and_applies_subtitle_display_speed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     import app.ui.pet_window as pet_window_module
     from app.ui.pet_window import PetWindow
@@ -6270,6 +6321,7 @@ def _minimal_settings_window(pet_window_cls, settings_service, api_client, memor
 
     class MinimalSettingsWindow:
         show_settings = pet_window_cls.show_settings
+        _activate_settings_dialog = pet_window_cls._activate_settings_dialog
         _retire_tts_provider = pet_window_cls._retire_tts_provider
         _apply_subtitle_display_speed = pet_window_cls._apply_subtitle_display_speed
 
