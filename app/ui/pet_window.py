@@ -3107,7 +3107,14 @@ class PetWindow(QWidget):
         disconnect_tts_error_signal = getattr(self, "_disconnect_tts_error_signal", None)
         if callable(disconnect_tts_error_signal):
             disconnect_tts_error_signal(self.tts_provider)
-        self._retire_tts_provider(self.tts_provider)
+        keep_local_tts_service = _should_keep_tts_local_service(
+            self.tts_provider,
+            new_tts_provider,
+        )
+        self._retire_tts_provider(
+            self.tts_provider,
+            keep_local_service=keep_local_tts_service,
+        )
         self.tts_provider = new_tts_provider
         self.voice_playback_controller.set_provider(new_tts_provider)
         connect_tts_error_signal = getattr(self, "_connect_tts_error_signal", None)
@@ -3234,7 +3241,11 @@ class PetWindow(QWidget):
             debug_log("PetWindow", "设置保存后 TTS 保持关闭")
             return NullTTSProvider()
         try:
-            provider = GenieTTSProvider(settings) if settings.provider == TTS_PROVIDER_GENIE else GPTSoVITSTTSProvider(settings)
+            provider = (
+                GenieTTSProvider(settings, adopt_existing_service=False)
+                if settings.provider == TTS_PROVIDER_GENIE
+                else GPTSoVITSTTSProvider(settings, adopt_existing_service=False)
+            )
             debug_log(
                 "PetWindow",
                 "设置保存后 TTS Provider 已创建",
@@ -3250,7 +3261,28 @@ class PetWindow(QWidget):
             show_themed_critical(self, "TTS 配置无效", f"无法启用 TTS，当前语音配置保持不变：{exc}")
             return None
 
-    def _retire_tts_provider(self, provider: TTSProvider) -> None:
+    def _retire_tts_provider(
+        self,
+        provider: TTSProvider,
+        *,
+        keep_local_service: bool = False,
+    ) -> None:
+        if keep_local_service:
+            detach = getattr(provider, "detach_local_service", None)
+            if callable(detach):
+                try:
+                    detach()
+                    debug_log(
+                        "TTS",
+                        "切换配置时保留本地 TTS 服务进程",
+                        {"provider": type(provider).__name__},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    debug_log(
+                        "TTS",
+                        "交出旧 TTS 本地服务所有权失败",
+                        {"provider": type(provider).__name__, "error": str(exc)},
+                    )
         close = getattr(provider, "close", None)
         if callable(close):
             try:
@@ -3926,6 +3958,35 @@ def _build_status_tray_icon(color_text: str) -> QIcon:
     painter.end()
 
     return QIcon(pixmap)
+
+
+def _should_keep_tts_local_service(old_provider: TTSProvider, new_provider: TTSProvider) -> bool:
+    old_settings = getattr(old_provider, "settings", None)
+    new_settings = getattr(new_provider, "settings", None)
+    if not isinstance(old_settings, GPTSoVITSTTSSettings) or not isinstance(
+        new_settings,
+        GPTSoVITSTTSSettings,
+    ):
+        return False
+    if not old_settings.enabled or not new_settings.enabled:
+        return False
+    if old_settings.provider != new_settings.provider:
+        return False
+    if old_settings.api_url.strip() != new_settings.api_url.strip():
+        return False
+    if old_settings.work_dir is None or new_settings.work_dir is None:
+        return False
+    return (
+        _same_optional_path(old_settings.work_dir, new_settings.work_dir)
+        and _same_optional_path(old_settings.python_path, new_settings.python_path)
+        and _same_optional_path(old_settings.tts_config_path, new_settings.tts_config_path)
+    )
+
+
+def _same_optional_path(left: Path | None, right: Path | None) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return left.resolve() == right.resolve()
 
 
 def _should_write_character_theme(theme_write_mode: object, profile: CharacterProfile) -> bool:

@@ -2614,6 +2614,56 @@ def test_pet_window_retires_tts_provider_by_closing_it() -> None:
     assert window.retired_tts_providers == [provider]
 
 
+def test_pet_window_retires_tts_provider_without_stopping_kept_service() -> None:
+    from app.ui.pet_window import PetWindow
+
+    calls: list[str] = []
+
+    class ProviderStub:
+        def detach_local_service(self) -> None:
+            calls.append("detach")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    class MinimalWindow:
+        _retire_tts_provider = PetWindow._retire_tts_provider
+
+    window = MinimalWindow()
+    window.retired_tts_providers = []
+    provider = ProviderStub()
+
+    window._retire_tts_provider(provider, keep_local_service=True)
+
+    assert calls == ["detach", "close"]
+    assert window.retired_tts_providers == [provider]
+
+
+def test_tts_local_service_reuse_requires_same_runtime() -> None:
+    from app.ui.pet_window import _should_keep_tts_local_service
+
+    class ProviderStub:
+        def __init__(self, settings: GPTSoVITSTTSSettings) -> None:
+            self.settings = settings
+
+    root = _ui_runtime_root("tts_local_service_reuse")
+    settings = replace(
+        _minimal_tts_settings(),
+        enabled=True,
+        work_dir=root / "tts" / "g50",
+    )
+
+    assert _should_keep_tts_local_service(ProviderStub(settings), ProviderStub(settings))
+    assert not _should_keep_tts_local_service(
+        ProviderStub(settings),
+        ProviderStub(replace(settings, api_url="http://127.0.0.1:9881/tts")),
+    )
+    assert not _should_keep_tts_local_service(
+        ProviderStub(settings),
+        ProviderStub(replace(settings, work_dir=root / "tts" / "cpu")),
+    )
+
+
 def _process_events_until(app, predicate, timeout_ms: int = 1500):  # type: ignore[no-untyped-def]
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:

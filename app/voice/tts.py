@@ -360,7 +360,12 @@ class GPTSoVITSTTSProvider(QObject):
     _started = Signal(object)
     _finished = Signal(object)
 
-    def __init__(self, settings: GPTSoVITSTTSSettings) -> None:
+    def __init__(
+        self,
+        settings: GPTSoVITSTTSSettings,
+        *,
+        adopt_existing_service: bool = True,
+    ) -> None:
         super().__init__()
         settings.validate()
         self.settings = settings
@@ -382,7 +387,10 @@ class GPTSoVITSTTSProvider(QObject):
         self._playback_warmup_requested = False
         self._playback_finish_token = 0
         # 播放后端：audio_sink 或 media_player
-        self._playback_backend: str = getattr(settings, "playback_backend", _DEFAULT_PLAYBACK_BACKEND) or _DEFAULT_PLAYBACK_BACKEND
+        self._playback_backend: str = (
+            getattr(settings, "playback_backend", _DEFAULT_PLAYBACK_BACKEND)
+            or _DEFAULT_PLAYBACK_BACKEND
+        )
         self._sink_player: AudioSinkPlayer | None = None
 
         self._audio_output: QAudioOutput | None = None
@@ -393,7 +401,8 @@ class GPTSoVITSTTSProvider(QObject):
         self._failed.connect(self._log_error)
         self._started.connect(self._run_callback)
         self._finished.connect(self._run_callback)
-        self._adopt_existing_configured_service()
+        if adopt_existing_service:
+            self._adopt_existing_configured_service()
 
     def speak(
         self,
@@ -1481,6 +1490,11 @@ class GPTSoVITSTTSProvider(QObject):
         self._release_player_source()
         self._stop_local_service()
 
+    def detach_local_service(self) -> None:
+        """交出本地服务进程所有权，供新的 Provider 在后台接管。"""
+
+        self._server_process = None
+
     def _stop_local_service(self) -> None:
         process = self._server_process
         if process is None:
@@ -1505,8 +1519,13 @@ class GPTSoVITSTTSProvider(QObject):
 class GenieTTSProvider(GPTSoVITSTTSProvider):
     """Genie TTS CPU 推理 Provider，复用现有队列、预生成和播放器链路。"""
 
-    def __init__(self, settings: GPTSoVITSTTSSettings) -> None:
-        super().__init__(settings)
+    def __init__(
+        self,
+        settings: GPTSoVITSTTSSettings,
+        *,
+        adopt_existing_service: bool = True,
+    ) -> None:
+        super().__init__(settings, adopt_existing_service=adopt_existing_service)
         self._loaded_character_name: str | None = None
         self._reference_audio_key: str | None = None
 

@@ -152,6 +152,24 @@ def test_tone_references_load_four_part_rows_only() -> None:
     assert all(reference.ref_audio_path.exists() for items in references.values() for reference in items)
 
 
+def test_tts_provider_can_skip_constructor_service_adoption(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[str] = []
+
+    def fake_adopt(self) -> None:  # type: ignore[no-untyped-def]
+        calls.append(type(self).__name__)
+
+    monkeypatch.setattr(
+        GPTSoVITSTTSProvider,
+        "_adopt_existing_configured_service",
+        fake_adopt,
+    )
+
+    GPTSoVITSTTSProvider(_minimal_tts_settings(), adopt_existing_service=False)
+    GPTSoVITSTTSProvider(_minimal_tts_settings())
+
+    assert calls == ["GPTSoVITSTTSProvider"]
+
+
 def test_tts_service_probe_reports_unavailable_service(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     provider = types.SimpleNamespace()
     provider.settings = _minimal_tts_settings()
