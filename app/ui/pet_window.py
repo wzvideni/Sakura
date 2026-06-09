@@ -3547,16 +3547,28 @@ class PetWindow(QWidget):
         for window in (getattr(self, "bubble_window", None), getattr(self, "input_window", None)):
             if window is not None:
                 window.set_theme(stylesheet, tint)
-        # 输入栏软件模糊背景层的叠色 tint 随主题更新。
+        # 输入栏软件模糊背景层的叠色与暗色遮罩随主题更新。
         background = getattr(self, "input_blur_background", None)
         if background is not None:
             background.set_tint(tint)
+            background.set_shadow_overlay(self._card_shadow_overlay())
 
     def _card_tint(self) -> QColor:
         # 亚克力磨砂底色：从气泡背景色派生，alpha 偏低让背后桌面更通透、磨砂更淡。
         tint = QColor(self.theme_settings.bubble_background_color)
         tint.setAlpha(55)
         return tint
+
+    def _card_shadow_overlay(self) -> QColor:
+        # 由主题主色压暗得到轻遮罩：保留主题倾向，同时保持“黑色遮罩”的压光效果。
+        source = QColor(self.theme_settings.primary_color)
+        overlay = QColor(
+            int(source.red() * 0.35),
+            int(source.green() * 0.35),
+            int(source.blue() * 0.35),
+            24,
+        )
+        return overlay
 
     def _apply_character(self, profile: CharacterProfile) -> None:
         previous_character_id = self.character_profile.id

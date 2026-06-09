@@ -76,13 +76,14 @@ class InputBlurBackground(QWidget):
 
     纯展示层，铺满输入栏卡片窗口、置于最底，鼠标事件透传给上层输入控件。
     替代原 DWM 亚克力——亚克力是窗口级合成、无视 Qt 圆角裁剪，做不出大圆角；
-    这里用 QPainterPath 自绘任意圆角，叠一层主题 tint 保持与原磨砂卡片相近的色调与可读性。
+    这里用 QPainterPath 自绘任意圆角，先叠主题派生的暗色遮罩压低背景亮度，再叠主题 tint 保持色调与可读性。
     """
 
     def __init__(self, corner_radius: float = 22.0, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._corner_radius = float(corner_radius)
         self._pixmap = QPixmap()
+        self._shadow_overlay = QColor(0, 0, 0, 22)
         self._tint = QColor(255, 255, 255, 40)
         # 纯展示层：不抢鼠标、不画系统默认背景（全部交给 paintEvent）。
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -98,6 +99,10 @@ class InputBlurBackground(QWidget):
 
     def set_tint(self, tint: QColor) -> None:
         self._tint = QColor(tint)
+        self.update()
+
+    def set_shadow_overlay(self, overlay: QColor) -> None:
+        self._shadow_overlay = QColor(overlay)
         self.update()
 
     def set_corner_radius(self, radius: float) -> None:
@@ -118,6 +123,8 @@ class InputBlurBackground(QWidget):
         if not self._pixmap.isNull():
             # pixmap 已设 devicePixelRatio，drawPixmap 按逻辑坐标自动缩放对齐。
             painter.drawPixmap(self.rect(), self._pixmap)
+        # 主题派生的暗色遮罩压住高亮桌面背景，避免磨砂层在浅色窗口上发白刺眼。
+        painter.fillRect(rect, self._shadow_overlay)
         # 叠主题 tint（半透明），统一色调并在任何背景下保证内容可读。
         painter.fillRect(rect, self._tint)
 

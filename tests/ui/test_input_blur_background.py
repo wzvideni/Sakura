@@ -49,6 +49,24 @@ def test_input_blur_background_paint_with_pixmap_does_not_raise() -> None:
     widget.deleteLater()
 
 
+def test_input_blur_background_uses_configured_shadow_overlay() -> None:
+    _qt_app_or_skip()
+    widget = InputBlurBackground(corner_radius=0.0)
+    widget.resize(120, 40)
+    widget.set_shadow_overlay(QColor(80, 0, 0, 128))
+    widget.set_tint(QColor(255, 255, 255, 0))
+    widget.set_blurred_pixmap(_solid_pixmap(120, 40))
+
+    image = widget.grab().toImage()
+    center = image.pixelColor(60, 20)
+
+    assert center.red() < 120
+    assert center.green() < 180
+    assert center.blue() < 220
+    assert center.red() > center.green()
+    widget.deleteLater()
+
+
 def test_input_blur_background_paint_without_pixmap_uses_tint() -> None:
     _qt_app_or_skip()
     widget = InputBlurBackground()
