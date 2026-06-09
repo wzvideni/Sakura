@@ -258,6 +258,8 @@ class OpenAICompatibleClient:
 
         content = raw_message.get("content")
         tool_calls = _parse_native_tool_calls(raw_message.get("tool_calls"))
+        if not tool_calls:
+            tool_calls = _parse_pseudo_tool_calls_from_content(content)
         normalized_message = _normalize_assistant_message(raw_message, content, tool_calls)
         debug_log(
             "API",
@@ -633,6 +635,75 @@ def _parse_native_tool_calls(raw_tool_calls: Any) -> list[NativeToolCall]:
             )
         )
     return parsed
+
+
+def _parse_pseudo_tool_calls_from_content(content: Any) -> list[NativeToolCall]:
+    """Parse OpenAI-compatible providers that emit tool calls as JSON text.
+
+    Some providers combine poorly with response_format=json_object and return
+    {"tool_call": "name", "parameters": {...}} in message.content instead of
+    native message.tool_calls. Keep this conservative: only accept top-level
+    JSON objects/lists that clearly describe tool calls.
+    """
+
+    if not isinstance(content, str) or not content.strip():
+        return []
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError:
+        return []
+
+    items: list[Any]
+    if isinstance(raw, dict) and isinstance(raw.get("tool_calls"), list):
+        items = raw["tool_calls"]
+    elif isinstance(raw, dict) and isinstance(raw.get("tool_call"), dict):
+        items = [raw["tool_call"]]
+    elif isinstance(raw, dict) and (
+        "tool_call" in raw or "tool" in raw or "name" in raw or "tool_name" in raw
+    ):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        return []
+
+    parsed: list[NativeToolCall] = []
+    for index, item in enumerate(items):
+        call = _parse_pseudo_tool_call(item, index)
+        if call is not None:
+            parsed.append(call)
+    return parsed
+
+
+def _parse_pseudo_tool_call(item: Any, index: int) -> NativeToolCall | None:
+    if not isinstance(item, dict):
+        return None
+    name = item.get("tool_call") or item.get("tool") or item.get("name") or item.get("tool_name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    arguments = (
+        item.get("arguments")
+        if "arguments" in item
+        else item.get("parameters", item.get("args", {}))
+    )
+    if isinstance(arguments, str):
+        try:
+            decoded = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            decoded = {}
+        arguments = decoded
+    if not isinstance(arguments, dict):
+        arguments = {}
+    arguments_json = json.dumps(arguments, ensure_ascii=False)
+    call_id = item.get("id")
+    if not isinstance(call_id, str) or not call_id.strip():
+        call_id = f"pseudo_tool_call_{index}"
+    return NativeToolCall(
+        id=call_id.strip(),
+        name=name.strip(),
+        arguments=dict(arguments),
+        arguments_json=arguments_json,
+    )
 
 
 def _normalize_assistant_message(

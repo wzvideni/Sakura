@@ -320,6 +320,126 @@ def test_complete_with_tools_can_request_structured_json(monkeypatch) -> None:  
     assert captured["response_format"] == {"type": "json_object"}
 
 
+def test_complete_with_tools_parses_pseudo_tool_call_json_content(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    def fake_post(_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '{"tool":"playwright_navigate",'
+                            '"parameters":{"url":"https://example.com"}}'
+                        ),
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "_post_chat_completions", fake_post)
+
+    turn = client.complete_with_tools(
+        "system",
+        [{"role": "user", "content": "open"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "playwright_navigate",
+                    "description": "Open",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+
+    assert turn.tool_calls[0].id == "pseudo_tool_call_0"
+    assert turn.tool_calls[0].name == "playwright_navigate"
+    assert turn.tool_calls[0].arguments == {"url": "https://example.com"}
+    assert turn.message["tool_calls"][0]["function"]["name"] == "playwright_navigate"
+
+
+def test_complete_with_tools_ignores_plain_json_reply_without_tool_call(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    monkeypatch.setattr(
+        client,
+        "_post_chat_completions",
+        lambda _payload: {
+            "choices": [{"message": {"role": "assistant", "content": '{"segments":[]}'}}]
+        },
+    )
+
+    turn = client.complete_with_tools(
+        "system",
+        [{"role": "user", "content": "hello"}],
+        structured_response=True,
+    )
+
+    assert turn.tool_calls == []
+    assert "tool_calls" not in turn.message
+
+
+def test_complete_with_tools_parses_nested_pseudo_tool_call(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = OpenAICompatibleClient(
+        ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="key",
+            model="model",
+        )
+    )
+
+    monkeypatch.setattr(
+        client,
+        "_post_chat_completions",
+        lambda _payload: {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '{"tool_call":{"name":"playwright_navigate",'
+                            '"arguments":{"url":"https://example.com"}}}'
+                        ),
+                    }
+                }
+            ]
+        },
+    )
+
+    turn = client.complete_with_tools(
+        "system",
+        [{"role": "user", "content": "open"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "playwright_navigate",
+                    "description": "Open",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+
+    assert turn.tool_calls[0].name == "playwright_navigate"
+    assert turn.tool_calls[0].arguments == {"url": "https://example.com"}
+
+
 def test_segmented_reply_instruction_requests_portrait_field() -> None:
     instruction = _build_segmented_reply_instruction(
         ["中性", "请求"],
