@@ -19,7 +19,10 @@ from app.llm.chat_reply import ChatSegment
 from app.ui.portrait_utils import portrait_kind_key, should_crossfade_portrait
 from app.ui.theme import (
     DEFAULT_THEME_SETTINGS,
+    SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME,
+    SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME,
     ThemeSettings,
+    build_app_chrome_stylesheet,
     build_message_box_stylesheet,
     build_pet_window_stylesheet,
 )
@@ -1387,13 +1390,16 @@ priority: 10
 
 def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtcore = pytest.importorskip("PySide6.QtCore")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
-    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QTabWidget")):
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QFrame", "QTabWidget")):
         pytest.skip("当前测试环境只提供了 PySide6 stub。")
 
     from app.ui.settings_dialog import SettingsDialog
 
+    Qt = qtcore.Qt
     QApplication = qtwidgets.QApplication
+    QFrame = qtwidgets.QFrame
     QTabWidget = qtwidgets.QTabWidget
     app = QApplication.instance() or QApplication([])
     root = _ui_runtime_root("grouped_settings_tabs")
@@ -1428,6 +1434,8 @@ def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     assert "QComboBox::drop-down" in dialog.styleSheet()
     assert "QComboBox::down-arrow" in dialog.styleSheet()
     assert "QComboBox QAbstractItemView" in dialog.styleSheet()
+    assert f"QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME}" in dialog.styleSheet()
+    assert f"QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}" in dialog.styleSheet()
     assert "QComboBox QAbstractItemView::item:selected" in dialog.styleSheet()
     assert "QComboBox QAbstractItemView::item:selected:!active" in dialog.styleSheet()
     assert "QSpinBox::up-button" in dialog.styleSheet()
@@ -1437,6 +1445,24 @@ def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     assert "QComboBox:disabled" in dialog.styleSheet()
     assert "QSpinBox::up-button:disabled" in dialog.styleSheet()
     assert "QGroupBox QWidget" not in dialog.styleSheet()
+    assert dialog.character_combo.view().objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
+    assert dialog.model_edit.view().objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
+    assert dialog.model_edit.completer().popup().objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
+    assert dialog.tts_provider_combo.view().objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
+    assert app.styleSheet() == build_app_chrome_stylesheet(dialog.theme_settings)
+
+    dialog.character_combo.showPopup()
+    app.processEvents()
+    popup_container = dialog.character_combo._popup_frame
+    popup_list = dialog.character_combo._popup_list
+    assert popup_container is not None
+    assert popup_list is not None
+    assert popup_container.objectName() == SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME
+    assert popup_container.frameShape() == QFrame.Shape.NoFrame
+    assert bool(popup_container.windowFlags() & Qt.WindowType.FramelessWindowHint)
+    assert bool(popup_container.windowFlags() & Qt.WindowType.NoDropShadowWindowHint)
+    assert popup_list.objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
+    dialog.character_combo.hidePopup()
 
     dialog.deleteLater()
     app.processEvents()
@@ -2224,6 +2250,11 @@ def test_settings_dialog_model_probe_populates_candidates_and_selects_first(monk
 
     assert dialog.model_edit.currentText() == "z-model"
     assert [dialog.model_edit.itemText(index) for index in range(dialog.model_edit.count())] == ["z-model", "a-model"]
+    dialog.model_edit.showPopup()
+    app.processEvents()
+    assert dialog.model_edit._popup_list is not None
+    assert dialog.model_edit._popup_list.count() == 2
+    dialog.model_edit.hidePopup()
     assert infos and "2" in infos[0]
     dialog.deleteLater()
     app.processEvents()
@@ -2484,8 +2515,8 @@ def test_settings_dialog_import_character_archive_refreshes_combo(monkeypatch) -
         "getOpenFileName",
         lambda *_args, **_kwargs: (str(archive_path), ""),
     )
-    monkeypatch.setattr(settings_dialog_module.QMessageBox, "information", lambda *_args, **_kwargs: None)
     warnings: list[str] = []
+    monkeypatch.setattr(settings_dialog_module.QMessageBox, "information", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         settings_dialog_module.QMessageBox,
         "warning",
@@ -2648,7 +2679,13 @@ def test_settings_dialog_allows_import_without_existing_character_registry(monke
         "getOpenFileName",
         lambda *_args, **_kwargs: (str(archive_path), ""),
     )
+    warnings: list[str] = []
     monkeypatch.setattr(settings_dialog_module.QMessageBox, "information", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        settings_dialog_module.QMessageBox,
+        "warning",
+        lambda *_args, **_kwargs: warnings.append(str(_args[2] if len(_args) > 2 else "")),
+    )
 
     assert dialog.character_combo.currentText() == "尚未导入角色"
     assert not dialog.character_combo.isEnabled()
@@ -2657,6 +2694,7 @@ def test_settings_dialog_allows_import_without_existing_character_registry(monke
 
     dialog._import_character_archive()
 
+    assert warnings == []
     assert dialog.character_combo.isEnabled()
     assert dialog.character_combo.currentData() == "nanami"
     assert dialog._selected_character_profile().display_name == "Nanami"
@@ -2726,6 +2764,7 @@ def test_settings_dialog_imports_voice_archive_for_selected_character(monkeypatc
 
 def test_settings_dialog_export_button_uses_menu_actions(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtcore = pytest.importorskip("PySide6.QtCore")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
     if not hasattr(qtwidgets, "QApplication"):
         pytest.skip("当前测试环境只提供了 PySide6 stub。")
@@ -2734,6 +2773,7 @@ def test_settings_dialog_export_button_uses_menu_actions(monkeypatch) -> None:  
     from app.config.character_loader import CharacterRegistry
     from app.ui.settings_dialog import SettingsDialog
 
+    Qt = qtcore.Qt
     case_root = _ui_runtime_root("char_export_menu")
     root = case_root / "runtime"
     profile = _build_settings_dialog_character(root, "sakura", "Sakura")
@@ -2765,6 +2805,9 @@ def test_settings_dialog_export_button_uses_menu_actions(monkeypatch) -> None:  
 
     assert dialog.character_export_button.text() == "导出"
     assert dialog.character_export_button.menu() is dialog.character_export_menu
+    assert bool(dialog.character_export_menu.windowFlags() & Qt.WindowType.FramelessWindowHint)
+    assert bool(dialog.character_export_menu.windowFlags() & Qt.WindowType.NoDropShadowWindowHint)
+    assert dialog.character_export_menu.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     assert [action.text() for action in dialog.character_export_menu.actions()] == [
         "导出完整包 (.char)",
         "导出单角色包 (.char)",

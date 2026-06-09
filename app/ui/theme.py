@@ -32,6 +32,8 @@ THEME_COLOR_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("bubble_background_color", "气泡背景色", DEFAULT_BUBBLE_BACKGROUND_COLOR),
     ("border_color", "边框色", DEFAULT_BORDER_COLOR),
 )
+SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME = "settingsComboPopupContainer"
+SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME = "settingsComboPopupView"
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -430,9 +432,24 @@ QComboBox::down-arrow {{
     width: 12px;
     height: 12px;
 }}
-QComboBox QAbstractItemView {{
+QComboBoxPrivateContainer {{
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}}
+QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} {{
     background: {rgba(theme.input_background_color, 246)};
-    border: 1px solid {rgba(theme.border_color, 158)};
+    border: none;
+    border-radius: 7px;
+    padding: 2px;
+}}
+QComboBox QAbstractItemView,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME},
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME},
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
+    background: {rgba(theme.input_background_color, 246)};
+    border: none;
     border-radius: 7px;
     color: {theme.text_color};
     font-size: 14px;
@@ -441,17 +458,43 @@ QComboBox QAbstractItemView {{
     selection-background-color: {rgba(theme.panel_background_color, 220)};
     selection-color: {theme.text_color};
 }}
-QComboBox QAbstractItemView::item {{
+QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
+    background: transparent;
+}}
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport {{
+    background: {rgba(theme.input_background_color, 246)};
+}}
+QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport {{
+    background: transparent;
+}}
+QComboBox QAbstractItemView::item,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item {{
     min-height: 22px;
     padding: 3px 8px;
     border-radius: 5px;
 }}
-QComboBox QAbstractItemView::item:hover {{
+QComboBox QAbstractItemView::item:hover,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover {{
     background: {rgba(theme.panel_background_color, 185)};
 }}
 QComboBox QAbstractItemView::item:selected,
 QComboBox QAbstractItemView::item:selected:active,
-QComboBox QAbstractItemView::item:selected:!active {{
+QComboBox QAbstractItemView::item:selected:!active,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active {{
     background: {rgba(theme.primary_color, 43)};
     color: {theme.text_color};
 }}
@@ -591,9 +634,49 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
     background: transparent;
 }}
-QComboBox QAbstractItemView {{
+QMenu {{
     background: {rgba(theme.input_background_color, 246)};
-    border: 1px solid {rgba(theme.border_color, 158)};
+    border: none;
+    border-radius: 8px;
+    color: {theme.text_color};
+    font-size: 14px;
+    padding: 6px;
+}}
+QMenu::item {{
+    background: transparent;
+    border-radius: 6px;
+    padding: 5px 20px 5px 20px;
+}}
+QMenu::item:selected {{
+    background: {rgba(theme.panel_background_color, 220)};
+    color: {theme.text_color};
+}}
+QMenu::item:disabled {{
+    color: {rgba(theme.muted_text_color, 145)};
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {rgba(theme.border_color, 105)};
+    margin: 3px 7px;
+}}
+QComboBoxPrivateContainer {{
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}}
+QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} {{
+    background: {rgba(theme.input_background_color, 246)};
+    border: none;
+    border-radius: 7px;
+    padding: 2px;
+}}
+QComboBox QAbstractItemView,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME},
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME},
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
+    background: {rgba(theme.input_background_color, 246)};
+    border: none;
     border-radius: 7px;
     color: {theme.text_color};
     outline: 0;
@@ -601,12 +684,43 @@ QComboBox QAbstractItemView {{
     selection-background-color: {rgba(theme.panel_background_color, 220)};
     selection-color: {theme.text_color};
 }}
-QComboBox QAbstractItemView::item {{
+QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
+    background: transparent;
+}}
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport {{
+    background: {rgba(theme.input_background_color, 246)};
+}}
+QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport {{
+    background: transparent;
+}}
+QComboBox QAbstractItemView::item,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item {{
     min-height: 22px;
     padding: 3px 8px;
     border-radius: 5px;
 }}
-QComboBox QAbstractItemView::item:selected {{
+QComboBox QAbstractItemView::item:hover,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover {{
+    background: {rgba(theme.panel_background_color, 185)};
+}}
+QComboBox QAbstractItemView::item:selected,
+QComboBox QAbstractItemView::item:selected:active,
+QComboBox QAbstractItemView::item:selected:!active,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
+QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
+QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
+QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active {{
     background: {rgba(theme.primary_color, 70)};
     color: {theme.text_color};
 }}
