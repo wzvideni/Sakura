@@ -38,12 +38,15 @@ class InputBarAnimator(QObject):
         is_pinned: Callable[[], bool],
         is_hover_active: Callable[[], bool],
         parent: QObject | None = None,
+        before_show: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._input_bar = input_bar
         self._input_window = input_window
         self._is_pinned = is_pinned
         self._is_hover_active = is_hover_active
+        # 显示前回调：输入栏现身前刷新软件模糊背景截图（截正后方桌面），避免现身后才换背景闪一下。
+        self._before_show = before_show
 
         # 仅用于发送脉冲：让输入栏内容做一次"暗-亮"，与窗口级 hover 淡入淡出分离。
         self._bar_effect = QGraphicsOpacityEffect(input_bar)
@@ -53,6 +56,8 @@ class InputBarAnimator(QObject):
         self._hover = False
         self._shown = False
         self._started = False
+        # 拖动期间挂起：停轮询并强制隐藏，避免静态模糊背景与移动后的真实桌面对不上而穿帮。
+        self._suspended = False
         self._anim: QPropertyAnimation | None = None
         self._send_anim: QSequentialAnimationGroup | None = None
 
@@ -73,6 +78,33 @@ class InputBarAnimator(QObject):
         """外部 pinned 状态（如待确认动作出现）变化时，立即重算可见性。"""
         self._sync()
 
+    def suspend_for_drag(self) -> None:
+        """拖动开始：停轮询并淡出隐藏输入栏，避免静态模糊背景与移动后的真实桌面穿帮。"""
+        self._suspended = True
+        self._poll_timer.stop()
+        if self._shown:
+            # 走淡出动画（而非瞬时隐藏），淡出结束后自动 hide。
+            self._shown = False
+            self._animate(False)
+        else:
+            self._input_window.hide()
+
+    def resume_after_drag(self) -> None:
+        """拖动结束：恢复轮询并按当前可见性走淡入/淡出动画重算。
+
+        应可见则经 _animate → before_show 截「新位置」桌面后慢慢淡入现身，否则保持收起。
+        依赖外部已先把输入窗口几何摆到新位置（_reposition_child_windows）。
+        """
+        if not self._started:
+            self._suspended = False
+            return
+        self._suspended = False
+        self._hover = bool(self._is_hover_active())
+        target = self._target_visible()
+        self._shown = target
+        self._animate(target)
+        self._poll_timer.start()
+
     # --- 内部逻辑 -----------------------------------------------------------
     def _on_poll(self) -> None:
         self._hover = bool(self._is_hover_active())
@@ -82,6 +114,8 @@ class InputBarAnimator(QObject):
         return self._hover or bool(self._is_pinned())
 
     def _sync(self) -> None:
+        if self._suspended:
+            return
         target = self._target_visible()
         if target == self._shown:
             return
@@ -94,6 +128,7 @@ class InputBarAnimator(QObject):
             self._anim.deleteLater()
             self._anim = None
         if show:
+            self._maybe_before_show()
             self._input_window.show()
         anim = QPropertyAnimation(self._input_window, b"windowOpacity")
         anim.setDuration(HOVER_ANIM_DURATION_MS)
@@ -116,6 +151,7 @@ class InputBarAnimator(QObject):
             self._anim = None
         self._shown = self._target_visible()
         if self._shown:
+            self._maybe_before_show()
             self._input_window.setWindowOpacity(1.0)
             self._input_window.show()
         else:
@@ -142,3 +178,8 @@ class InputBarAnimator(QObject):
         group.addAnimation(restore)
         group.start()
         self._send_anim = group
+
+    def _maybe_before_show(self) -> None:
+        """显示前回调：在输入栏窗口 show 之前刷新软件模糊背景截图（存在才调）。"""
+        if self._before_show is not None:
+            self._before_show()

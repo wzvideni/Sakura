@@ -6,7 +6,12 @@ from pathlib import Path
 
 from app.agent.mcp.settings import MCPRuntimeSettings
 from app.config.character_loader import CharacterRegistry
-from app.config.settings_service import AppSettingsService, DebugLogSettings, StartupSettings
+from app.config.settings_service import (
+    AppSettingsService,
+    BubbleSettings,
+    DebugLogSettings,
+    StartupSettings,
+)
 from app.config.yaml_config import load_yaml_mapping
 from app.llm.api_client import ApiSettings
 from app.agent.proactive_care import ProactiveCareSettings
@@ -122,6 +127,44 @@ def test_settings_service_loads_and_saves_startup_settings() -> None:
     assert service.load_startup_settings() == StartupSettings(launch_at_login=True)
     system = load_yaml_mapping(service.system_config_path)
     assert system["startup"]["launch_at_login"] is True
+
+
+def test_settings_service_loads_and_saves_bubble_settings() -> None:
+    root = _runtime_root("yaml_bubble")
+    service = AppSettingsService(root)
+
+    # 默认：开启、5 秒。
+    assert service.load_bubble_settings() == BubbleSettings(
+        auto_hide_enabled=True,
+        auto_hide_delay_seconds=5,
+    )
+
+    # 超出上限的时长应被 normalized 钳制到 120 秒。
+    service.save_bubble_settings(
+        BubbleSettings(auto_hide_enabled=False, auto_hide_delay_seconds=999)
+    )
+
+    loaded = service.load_bubble_settings()
+    assert loaded.auto_hide_enabled is False
+    assert loaded.auto_hide_delay_seconds == 120
+    system = load_yaml_mapping(service.system_config_path)
+    assert system["ui"]["bubble_auto_hide_enabled"] is False
+    assert system["ui"]["bubble_auto_hide_delay_seconds"] == 120
+
+
+def test_save_bubble_settings_preserves_other_ui_keys() -> None:
+    root = _runtime_root("yaml_bubble_preserve")
+    service = AppSettingsService(root)
+    service.save_system_values("ui", {"subtitle_language": "ja"})
+
+    service.save_bubble_settings(
+        BubbleSettings(auto_hide_enabled=True, auto_hide_delay_seconds=8)
+    )
+
+    system = load_yaml_mapping(service.system_config_path)
+    # 写气泡配置时用读-改-写，原有 ui 键不应丢失。
+    assert system["ui"]["subtitle_language"] == "ja"
+    assert system["ui"]["bubble_auto_hide_delay_seconds"] == 8
 
 
 def test_settings_service_loads_tts_work_dir_and_keeps_legacy_blank() -> None:

@@ -174,9 +174,9 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
     theme = settings.normalized()
     return f"""
 #speechBubble {{
-    background: {rgba(theme.bubble_background_color, 220)};
-    border: 1px solid {rgba(theme.border_color, 158)};
-    border-radius: 8px;
+    background: {rgba(theme.bubble_background_color, 238)};
+    border: 1px solid {rgba(theme.border_color, 170)};
+    border-radius: 20px;
 }}
 #speakerName {{
     color: {theme.primary_color};
@@ -248,8 +248,8 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
 }}
 #sendButton {{
     border-radius: 16px;
-    min-width: 68px;
-    padding: 4px 14px;
+    min-width: 50px;
+    padding: 4px 10px;
 }}
 #screenshotButton {{
     width: 36px;
@@ -297,15 +297,15 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
 QMenu {{
     background: {rgba(theme.input_background_color, 246)};
     border: 1px solid {rgba(theme.border_color, 164)};
-    border-radius: 8px;
+    border-radius: 14px;
     color: {theme.text_color};
     font-size: 14px;
-    padding: 4px;
+    padding: 6px;
 }}
 QMenu::item {{
     background: transparent;
-    border-radius: 6px;
-    padding: 4px 20px 4px 24px;
+    border-radius: 8px;
+    padding: 5px 20px 5px 24px;
 }}
 QMenu::item:selected {{
     background: {rgba(theme.panel_background_color, 220)};

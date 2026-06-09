@@ -58,6 +58,24 @@ class FallbackTintBackdrop:
         return False
 
 
+class SoftwareBlurBackdrop:
+    """软件截图模糊背景标记：不施加任何系统级模糊。
+
+    输入栏改用软件自截图 + 高斯模糊 + 自绘大圆角（见 app/ui/input_blur_background.py），
+    DWM 亚克力是窗口级合成、做不出大圆角，故这里把窗口从亚克力路径摘下：apply/remove 均为空操作，
+    圆角与背景完全由 InputBlurBackground 负责。supports_native_blur 返回 False（它是静态截图，非实时）。
+    """
+
+    def apply(self, window: QWidget, tint: QColor) -> None:
+        del window, tint
+
+    def remove(self, window: QWidget) -> None:
+        del window
+
+    def supports_native_blur(self) -> bool:
+        return False
+
+
 class WindowsAcrylicBackdrop:
     """Windows 亚克力背景模糊（DWM 合成器实时模糊窗口背后的真实桌面）。
 

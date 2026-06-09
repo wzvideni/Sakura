@@ -610,6 +610,13 @@ def test_pet_window_drag_uses_window_local_anchor_not_frame_geometry() -> None:
         def accept(self) -> None:
             self.accepted = True
 
+    class _DragAnimatorStub:
+        def suspend_for_drag(self) -> None:
+            pass
+
+        def resume_after_drag(self) -> None:
+            pass
+
     class MinimalWindow:
         _handle_mouse_press = PetWindow._handle_mouse_press
         _handle_mouse_move = PetWindow._handle_mouse_move
@@ -618,6 +625,8 @@ def test_pet_window_drag_uses_window_local_anchor_not_frame_geometry() -> None:
 
         def __init__(self) -> None:
             self.drag_anchor = None
+            self._dragging = False
+            self.input_bar_animator = _DragAnimatorStub()
             self.move_positions: list[object] = []
 
         def frameGeometry(self):  # type: ignore[no-untyped-def]
@@ -625,6 +634,9 @@ def test_pet_window_drag_uses_window_local_anchor_not_frame_geometry() -> None:
 
         def move(self, position) -> None:  # type: ignore[no-untyped-def]
             self.move_positions.append(position)
+
+        def _finish_drag_resume(self) -> None:
+            pass
 
     window = MinimalWindow()
     press_event = MouseEventStub(position=(40, 60), global_position=(240, 160))
@@ -674,6 +686,13 @@ def test_pet_window_drag_maps_child_widget_anchor_to_window_coordinates() -> Non
         def mapToGlobal(self, position):  # type: ignore[no-untyped-def]
             return position + qtcore.QPoint(200, 160)
 
+    class _DragAnimatorStub:
+        def suspend_for_drag(self) -> None:
+            pass
+
+        def resume_after_drag(self) -> None:
+            pass
+
     class MinimalWindow:
         _handle_mouse_press = PetWindow._handle_mouse_press
         _handle_mouse_move = PetWindow._handle_mouse_move
@@ -681,6 +700,8 @@ def test_pet_window_drag_maps_child_widget_anchor_to_window_coordinates() -> Non
 
         def __init__(self) -> None:
             self.drag_anchor = None
+            self._dragging = False
+            self.input_bar_animator = _DragAnimatorStub()
             self.move_positions: list[object] = []
 
         def mapFromGlobal(self, position):  # type: ignore[no-untyped-def]
@@ -3560,6 +3581,9 @@ def test_show_settings_does_not_save_or_reload_api_when_unchanged(monkeypatch) -
         def save_debug_log_settings(self, _settings):  # type: ignore[no-untyped-def]
             pass
 
+        def save_bubble_settings(self, _settings):  # type: ignore[no-untyped-def]
+            pass
+
         def save_system_values(self, *_args):  # type: ignore[no-untyped-def]
             pass
 
@@ -3629,6 +3653,9 @@ def test_show_settings_applies_launch_at_login_change(monkeypatch) -> None:  # t
             pass
 
         def save_debug_log_settings(self, _settings):  # type: ignore[no-untyped-def]
+            pass
+
+        def save_bubble_settings(self, _settings):  # type: ignore[no-untyped-def]
             pass
 
         def save_startup_settings(self, settings):  # type: ignore[no-untyped-def]
@@ -3762,6 +3789,9 @@ def test_show_settings_saves_and_applies_subtitle_display_speed(monkeypatch) -> 
             pass
 
         def save_debug_log_settings(self, _settings):  # type: ignore[no-untyped-def]
+            pass
+
+        def save_bubble_settings(self, _settings):  # type: ignore[no-untyped-def]
             pass
 
         def save_system_values(self, section, values):  # type: ignore[no-untyped-def]
@@ -4115,6 +4145,9 @@ def test_show_settings_reloads_memory_in_background_when_api_changes(monkeypatch
         def save_debug_log_settings(self, _settings):  # type: ignore[no-untyped-def]
             pass
 
+        def save_bubble_settings(self, _settings):  # type: ignore[no-untyped-def]
+            pass
+
         def save_system_values(self, *_args):  # type: ignore[no-untyped-def]
             pass
 
@@ -4208,6 +4241,9 @@ def test_show_settings_uses_dialog_refreshed_character_registry(monkeypatch) -> 
             pass
 
         def save_debug_log_settings(self, _settings):  # type: ignore[no-untyped-def]
+            pass
+
+        def save_bubble_settings(self, _settings):  # type: ignore[no-untyped-def]
             pass
 
         def save_system_values(self, *_args):  # type: ignore[no-untyped-def]
@@ -6602,6 +6638,7 @@ def _minimal_settings_window(pet_window_cls, settings_service, api_client, memor
         _retire_tts_provider = pet_window_cls._retire_tts_provider
         _apply_subtitle_display_speed = pet_window_cls._apply_subtitle_display_speed
         _apply_launch_at_login_settings = pet_window_cls._apply_launch_at_login_settings
+        _apply_bubble_settings = pet_window_cls._apply_bubble_settings
 
         def _create_tts_provider_from_settings(self, _settings):  # type: ignore[no-untyped-def]
             return object()

@@ -22,6 +22,7 @@ class AcrylicCardWindow(QWidget):
         *,
         activatable: bool,
         backdrop: WindowBackdrop | None = None,
+        background_layer: QWidget | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -41,6 +42,13 @@ class AcrylicCardWindow(QWidget):
         self.setLayout(layout)
         self._content = content
 
+        # 可选软件模糊背景层：不进 layout，手动铺满并置于最底，由内容控件的透明背景透出。
+        # 用于输入栏的软件截图模糊（替代 DWM 亚克力以实现大圆角），见 InputBlurBackground。
+        self._background_layer = background_layer
+        if background_layer is not None:
+            background_layer.setParent(self)
+            background_layer.lower()
+
     @property
     def content(self) -> QWidget:
         return self._content
@@ -54,6 +62,13 @@ class AcrylicCardWindow(QWidget):
 
     def supports_native_blur(self) -> bool:
         return self._backdrop.supports_native_blur()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        # 背景层始终铺满卡片窗口并保持在最底，跟随卡片尺寸变化。
+        if self._background_layer is not None:
+            self._background_layer.setGeometry(self.rect())
+            self._background_layer.lower()
 
     def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().showEvent(event)

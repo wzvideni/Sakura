@@ -49,7 +49,13 @@ from app.config.character_archive import (
     import_character_archive,
     import_character_voice_archive,
 )
-from app.config.settings_service import DebugLogSettings, StartupSettings
+from app.config.settings_service import (
+    BUBBLE_AUTO_HIDE_MAX_DELAY_SECONDS,
+    BUBBLE_AUTO_HIDE_MIN_DELAY_SECONDS,
+    BubbleSettings,
+    DebugLogSettings,
+    StartupSettings,
+)
 from app.platforms.launch_at_login import (
     is_launch_at_login_supported,
     launch_at_login_platform_text,
@@ -369,11 +375,13 @@ class SettingsDialog(QDialog):
         reply_segment_pause_ms: int = REPLY_SEGMENT_PAUSE_MS,
         theme_settings: ThemeSettings | None = None,
         startup_settings: StartupSettings | None = None,
+        bubble_settings: BubbleSettings | None = None,
     ) -> None:
         super().__init__(parent)
         self.base_dir = base_dir
         self.tts_settings = tts_settings
         self.startup_settings = startup_settings or StartupSettings()
+        self.bubble_settings = bubble_settings or BubbleSettings()
         self._initial_api_settings = api_settings
         self._initial_tts_settings = tts_settings
         self._initial_character_id = current_character.id if current_character is not None else None
@@ -414,6 +422,7 @@ class SettingsDialog(QDialog):
         self.result_mcp_settings: MCPRuntimeSettings | None = None
         self.result_debug_log_settings: DebugLogSettings | None = None
         self.result_startup_settings: StartupSettings | None = None
+        self.result_bubble_settings: BubbleSettings | None = None
         self.result_theme_settings: ThemeSettings | None = None
         self.result_theme_write_mode: Literal["unchanged", "manual", "ai", "reset", "character"] = "unchanged"
         self.result_plugin_config_changed = False
@@ -491,6 +500,7 @@ class SettingsDialog(QDialog):
             self._build_system_tab(
                 debug_log_settings or DebugLogSettings(),
                 self.startup_settings,
+                self.bubble_settings,
             ),
             "系统",
         )
@@ -1048,6 +1058,7 @@ class SettingsDialog(QDialog):
         self,
         debug_settings: DebugLogSettings,
         startup_settings: StartupSettings,
+        bubble_settings: BubbleSettings,
     ) -> QWidget:
         tab = QWidget(self)
         self.launch_at_login_check = QCheckBox("登录时自动启动 Sakura", tab)
@@ -1087,6 +1098,19 @@ class SettingsDialog(QDialog):
         self.reply_segment_pause_spin.setSuffix(" 毫秒")
         self.reply_segment_pause_spin.setValue(self.reply_segment_pause_ms)
 
+        self.bubble_auto_hide_check = QCheckBox("气泡无操作后自动隐藏", tab)
+        self.bubble_auto_hide_check.setChecked(bubble_settings.auto_hide_enabled)
+        self.bubble_auto_hide_delay_spin = QSpinBox(tab)
+        self.bubble_auto_hide_delay_spin.setRange(
+            BUBBLE_AUTO_HIDE_MIN_DELAY_SECONDS,
+            BUBBLE_AUTO_HIDE_MAX_DELAY_SECONDS,
+        )
+        self.bubble_auto_hide_delay_spin.setSuffix(" 秒")
+        self.bubble_auto_hide_delay_spin.setValue(
+            bubble_settings.normalized().auto_hide_delay_seconds
+        )
+        self.bubble_auto_hide_check.toggled.connect(self._sync_bubble_auto_hide_controls)
+
         form_layout = QFormLayout()
         form_layout.setContentsMargins(16, 18, 16, 16)
         form_layout.setSpacing(12)
@@ -1096,6 +1120,10 @@ class SettingsDialog(QDialog):
         form_layout.addRow("", self.debug_file_enabled_check)
         form_layout.addRow("字幕逐字间隔", self.subtitle_typing_interval_spin)
         form_layout.addRow("回复分段停顿", self.reply_segment_pause_spin)
+        form_layout.addRow("", self.bubble_auto_hide_check)
+        form_layout.addRow("气泡无操作时长", self.bubble_auto_hide_delay_spin)
+        self._system_form_layout = form_layout
+        self._sync_bubble_auto_hide_controls(self.bubble_auto_hide_check.isChecked())
         tab.setLayout(form_layout)
         return tab
 
@@ -1109,6 +1137,15 @@ class SettingsDialog(QDialog):
                 self.proactive_cooldown_spin,
                 self.proactive_batch_limit_spin,
             ),
+            enabled,
+        )
+
+    @Slot(bool)
+    def _sync_bubble_auto_hide_controls(self, enabled: bool) -> None:
+        """气泡自动隐藏关闭时，不允许调整无操作时长。"""
+        self._set_form_widgets_enabled(
+            getattr(self, "_system_form_layout", None),
+            (self.bubble_auto_hide_delay_spin,),
             enabled,
         )
 
@@ -2012,6 +2049,10 @@ class SettingsDialog(QDialog):
                     else self.startup_settings.launch_at_login
                 ),
             ),
+            "bubble_settings": BubbleSettings(
+                auto_hide_enabled=self.bubble_auto_hide_check.isChecked(),
+                auto_hide_delay_seconds=self.bubble_auto_hide_delay_spin.value(),
+            ),
         }
 
     def _complete_accept(self, values: dict[str, object]) -> None:
@@ -2026,6 +2067,7 @@ class SettingsDialog(QDialog):
         mcp_settings = values["mcp_settings"]
         debug_log_settings = values["debug_log_settings"]
         startup_settings = values["startup_settings"]
+        bubble_settings = values["bubble_settings"]
 
         if not isinstance(api_settings, ApiSettings):
             return
@@ -2049,6 +2091,8 @@ class SettingsDialog(QDialog):
             return
         if not isinstance(startup_settings, StartupSettings):
             return
+        if not isinstance(bubble_settings, BubbleSettings):
+            return
 
         try:
             plugin_config_changed = self._save_plugin_settings_if_needed()
@@ -2068,6 +2112,7 @@ class SettingsDialog(QDialog):
         self.result_mcp_settings = mcp_settings
         self.result_debug_log_settings = debug_log_settings
         self.result_startup_settings = startup_settings
+        self.result_bubble_settings = bubble_settings
         self.result_plugin_config_changed = plugin_config_changed
         super().accept()
 

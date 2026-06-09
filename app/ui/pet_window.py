@@ -82,7 +82,7 @@ from app.llm.chat_reply import ChatReply, ChatSegment, parse_chat_reply_result
 from app.llm.context_trimming import trim_messages_for_model
 from app.core.chat_worker import ChatWorker, EventWorker
 from app.core.debug_log import debug_log, summarize_messages
-from app.config.settings_service import StartupSettings
+from app.config.settings_service import BubbleSettings, StartupSettings
 from app.platforms.launch_at_login import (
     LaunchAtLoginError,
     set_launch_at_login_enabled,
@@ -132,6 +132,9 @@ from app.storage.visual_observation import (
 from app.ui.fonts import _rounded_chinese_font, _rounded_japanese_font
 from app.ui.input_bar_animator import InputBarAnimator
 from app.ui.acrylic_card_window import AcrylicCardWindow
+from app.ui.window_backdrop import FallbackTintBackdrop, SoftwareBlurBackdrop
+from app.ui.input_blur_background import InputBlurBackground, make_blurred_pixmap
+from app.ui.bubble_auto_hide import BubbleAutoHideController
 from app.ui import (
     ManualScreenshotOverlay,
     PortraitController,
@@ -370,6 +373,8 @@ class PetWindow(QWidget):
         self.memory_curation_consumed_turns = 0
         self.pending_history_clear_after_curation = False
         self.drag_anchor: QPoint | None = None
+        # 是否正在拖动窗口：首次 move 置位，用于拖动时收起输入栏、区分单击与拖动（单击桌宠唤回气泡）。
+        self._dragging = False
         self.portrait_scale_percent = self._load_portrait_scale_percent()
         (
             self.subtitle_typing_interval_ms,
@@ -579,8 +584,14 @@ class PetWindow(QWidget):
         bubble_layout.setSpacing(0)
         bubble_layout.addLayout(bubble_body_layout, 1)
         self.bubble.setLayout(bubble_layout)
-        # 气泡独立为磨砂卡片子窗口：立绘保持透明悬浮，气泡背后由系统亚克力模糊真实桌面。
-        self.bubble_window = AcrylicCardWindow(self.bubble, activatable=False, parent=self)
+        # 气泡独立为半透明卡片子窗口：放弃 DWM 亚克力（做不出大圆角），改纯半透明无模糊，
+        # 圆角与底色由 #speechBubble 的 QSS 大圆角 + 较高 alpha 背景负责（保证文字可读）。
+        self.bubble_window = AcrylicCardWindow(
+            self.bubble,
+            activatable=False,
+            backdrop=FallbackTintBackdrop(),
+            parent=self,
+        )
 
         self.input_bar = QFrame(self)
         self.input_bar.setObjectName("inputBar")
@@ -623,13 +634,31 @@ class PetWindow(QWidget):
         input_layout.addWidget(self.screenshot_button)
         input_layout.addWidget(self.send_button)
         self.input_bar.setLayout(input_layout)
-        # 输入栏独立为可激活的磨砂卡片子窗口（可聚焦打字），默认收起、hover 浮现。
-        self.input_window = AcrylicCardWindow(self.input_bar, activatable=True, parent=self)
+        # 输入栏独立为可激活的卡片子窗口（可聚焦打字），默认收起、hover 浮现。
+        # 改软件截图模糊（替代亚克力以实现大圆角）：背景层垫在内容下，浮现/松手时刷新截图。
+        self.input_blur_background = InputBlurBackground(corner_radius=22.0)
+        self.input_window = AcrylicCardWindow(
+            self.input_bar,
+            activatable=True,
+            backdrop=SoftwareBlurBackdrop(),
+            background_layer=self.input_blur_background,
+            parent=self,
+        )
         self.input_bar_animator = InputBarAnimator(
             self.input_bar,
             self.input_window,
             self._input_bar_pinned,
             self._cursor_in_pet_region,
+            parent=self,
+            before_show=self._refresh_input_blur_background,
+        )
+        # 气泡无操作自动隐藏控制器：说完话后倒计时，悬停桌宠暂停，超时淡出，点击桌宠唤回。
+        self.bubble_settings = self.settings_service.load_bubble_settings()
+        self.bubble_auto_hide = BubbleAutoHideController(
+            self.bubble_window,
+            self._cursor_in_pet_region,
+            enabled=self.bubble_settings.auto_hide_enabled,
+            delay_seconds=self.bubble_settings.auto_hide_delay_seconds,
             parent=self,
         )
         self._sync_plugin_chat_ui_widgets()
@@ -676,6 +705,8 @@ class PetWindow(QWidget):
             self.bubble_window.show()
         if hasattr(self, "input_bar_animator"):
             self.input_bar_animator.start()
+        if hasattr(self, "bubble_auto_hide"):
+            self.bubble_auto_hide.start()
         self._refresh_tray_menu()
         self._schedule_native_topmost_sync()
         if getattr(self, "memory_failure_dialog_pending_message", ""):
@@ -827,6 +858,10 @@ class PetWindow(QWidget):
 
     def _handle_mouse_move(self, event: QMouseEvent) -> bool:
         if event.buttons() & Qt.MouseButton.LeftButton and self.drag_anchor is not None:
+            if not self._dragging:
+                # 首次进入拖动：收起输入栏，避免静态模糊背景与移动后的真实桌面对不上而穿帮。
+                self._dragging = True
+                self.input_bar_animator.suspend_for_drag()
             self.move(event.globalPosition().toPoint() - self.drag_anchor)
             event.accept()
             return True
@@ -834,7 +869,15 @@ class PetWindow(QWidget):
 
     def _handle_mouse_release(self, event: QMouseEvent) -> bool:
         if event.button() == Qt.MouseButton.LeftButton:
+            was_dragging = self._dragging
             self.drag_anchor = None
+            self._dragging = False
+            if was_dragging:
+                # 拖动结束：延一帧等窗口真正落位，再重截新位置桌面并重新显示输入栏。
+                QTimer.singleShot(0, self._finish_drag_resume)
+            else:
+                # 单击（非拖动）桌宠：若气泡处于自动隐藏态则唤回。
+                self._handle_pet_click()
             event.accept()
             return True
         if event.button() == Qt.MouseButton.RightButton:
@@ -842,6 +885,29 @@ class PetWindow(QWidget):
             event.accept()
             return True
         return False
+
+    def _finish_drag_resume(self) -> None:
+        """拖动松手后：把卡片窗口摆到新位置，再让输入栏按可见性重算（重截新位置桌面后现身）。"""
+        self._reposition_child_windows()
+        animator = getattr(self, "input_bar_animator", None)
+        if animator is not None:
+            animator.resume_after_drag()
+
+    def _handle_pet_click(self) -> None:
+        """单击桌宠（非拖动）：唤回被自动隐藏的气泡。具体由气泡自动隐藏控制器实现。"""
+        controller = getattr(self, "bubble_auto_hide", None)
+        if controller is not None:
+            controller.handle_pet_clicked()
+
+    def _apply_bubble_settings(self, settings: BubbleSettings) -> None:
+        """应用气泡无操作自动隐藏配置到控制器（设置保存后调用）。"""
+        self.bubble_settings = settings
+        controller = getattr(self, "bubble_auto_hide", None)
+        if controller is not None:
+            controller.set_settings(
+                enabled=settings.auto_hide_enabled,
+                delay_seconds=settings.auto_hide_delay_seconds,
+            )
 
     def _drag_anchor_from_event(
         self,
@@ -870,6 +936,10 @@ class PetWindow(QWidget):
     def _apply_reply_segment(self, segment: ChatSegment) -> None:
         self.portrait_controller.apply_for_segment(segment)
         self._sync_reply_history_index_for_segment(segment)
+        # 新台词开始：保持气泡显示并暂停自动隐藏倒计时。
+        controller = getattr(self, "bubble_auto_hide", None)
+        if controller is not None:
+            controller.notify_speaking()
 
     def _remember_reply_history_segments(self, segments: list[ChatSegment]) -> None:
         clean_segments = [segment for segment in segments if segment.text.strip()]
@@ -1084,6 +1154,48 @@ class PetWindow(QWidget):
     def _local_rect_to_global(self, rect: QRect) -> QRect:
         return QRect(self.mapToGlobal(rect.topLeft()), rect.size())
 
+    def _refresh_input_blur_background(self) -> None:
+        """输入栏现身前刷新软件模糊背景：截输入栏正后方那块桌面，模糊后铺到背景层。
+
+        输入栏窗口自身在截图区域内，会被 grabWindow 截进去，故截图前先确保它隐藏、
+        让出一帧待合成器把窗口移出画面后再截。气泡位于输入栏正上方、不在输入栏截图区域内
+        （_layout_stage 中两者有 input_gap 间隔不重叠），无需隐藏气泡——隐藏反而会导致气泡闪烁。
+        """
+        background = getattr(self, "input_blur_background", None)
+        input_rect = getattr(self, "_input_local_rect", None)
+        if background is None or input_rect is None:
+            return
+
+        self.input_window.hide()
+        # 让出一帧，确保 DWM 把刚隐藏的窗口移出画面，否则会截到残影。
+        QApplication.processEvents()
+
+        try:
+            global_rect = self._local_rect_to_global(input_rect)
+            blurred = self._build_blurred_background(global_rect)
+            if blurred is not None and not blurred.isNull():
+                background.set_blurred_pixmap(blurred)
+        except Exception as exc:  # noqa: BLE001
+            debug_log("UI", "输入栏软件模糊背景刷新失败", {"error": str(exc)})
+
+    def _build_blurred_background(self, global_rect: QRect) -> QPixmap | None:
+        """截取虚拟桌面，裁出 global_rect（逻辑全局坐标）对应区域并做高斯模糊。
+
+        capture_virtual_desktop_pixmap 已把各屏物理像素归一化贴入「逻辑尺寸」的虚拟桌面图，
+        故这里直接按逻辑坐标裁剪即可，无需再做 devicePixelRatio 换算。
+        """
+        desktop_pixmap, virtual_geometry = self._capture_virtual_desktop_pixmap()
+        if desktop_pixmap.isNull():
+            return None
+        offset = global_rect.topLeft() - virtual_geometry.topLeft()
+        crop = QRect(offset.x(), offset.y(), global_rect.width(), global_rect.height())
+        crop = crop.intersected(desktop_pixmap.rect())
+        if crop.isEmpty():
+            return None
+        cropped = desktop_pixmap.copy(crop)
+        # 模糊力度：radius 作用在降采样后的小图上，downscale 越大放大回来越糊。
+        return make_blurred_pixmap(cropped, radius=4.0, downscale=2)
+
     def _cursor_in_pet_region(self) -> bool:
         # 设置/历史窗口打开时禁用输入栏浮现，避免盖住对话框。
         if self._any_dialog_open():
@@ -1223,6 +1335,10 @@ class PetWindow(QWidget):
         # 每完成一轮对话（含完整回复）累计一次，驱动自动记忆整理触发
         if outcome == "reply_completed":
             self._record_completed_memory_turn()
+            # 说完话：开始气泡无操作自动隐藏倒计时。
+            controller = getattr(self, "bubble_auto_hide", None)
+            if controller is not None:
+                controller.notify_settled()
 
     def _mark_user_activity(self) -> None:
         self.last_user_activity_at = time.perf_counter()
@@ -2852,6 +2968,7 @@ class PetWindow(QWidget):
             reply_segment_pause_ms=self.reply_segment_pause_ms,
             theme_settings=getattr(self, "theme_settings", DEFAULT_THEME_SETTINGS),
             startup_settings=getattr(self, "startup_settings", StartupSettings()),
+            bubble_settings=getattr(self, "bubble_settings", BubbleSettings()),
         )
         self.settings_dialog = dialog
         # 始终置顶，避免被桌宠卡片（同为置顶窗口）盖住。
@@ -2883,6 +3000,11 @@ class PetWindow(QWidget):
             dialog,
             "result_startup_settings",
             current_startup_settings,
+        )
+        result_bubble_settings = getattr(
+            dialog,
+            "result_bubble_settings",
+            getattr(self, "bubble_settings", BubbleSettings()),
         )
         if (
             dialog.result_api_settings is None
@@ -2957,6 +3079,7 @@ class PetWindow(QWidget):
                     "reply_segment_pause_ms": result_reply_segment_pause_ms,
                 },
             )
+            self.settings_service.save_bubble_settings(result_bubble_settings)
         except (CharacterConfigError, OSError) as exc:
             show_themed_critical(self, "保存失败", f"无法保存设置：{exc}")
             return
@@ -2969,6 +3092,7 @@ class PetWindow(QWidget):
             result_subtitle_typing_interval_ms,
             result_reply_segment_pause_ms,
         )
+        self._apply_bubble_settings(result_bubble_settings)
         apply_theme_settings = getattr(self, "_apply_theme_settings", None)
         if callable(apply_theme_settings):
             apply_theme_settings(result_theme_settings)
@@ -3423,6 +3547,10 @@ class PetWindow(QWidget):
         for window in (getattr(self, "bubble_window", None), getattr(self, "input_window", None)):
             if window is not None:
                 window.set_theme(stylesheet, tint)
+        # 输入栏软件模糊背景层的叠色 tint 随主题更新。
+        background = getattr(self, "input_blur_background", None)
+        if background is not None:
+            background.set_tint(tint)
 
     def _card_tint(self) -> QColor:
         # 亚克力磨砂底色：从气泡背景色派生，alpha 偏低让背后桌面更通透、磨砂更淡。

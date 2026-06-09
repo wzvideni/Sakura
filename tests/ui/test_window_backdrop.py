@@ -60,6 +60,7 @@ def test_backdrops_apply_remove_do_not_raise() -> None:
     # 任一 backdrop 的 apply/remove 都不应抛异常（失败时内部 try/except 降级）。
     for backdrop in (
         wb.FallbackTintBackdrop(),
+        wb.SoftwareBlurBackdrop(),
         wb.WindowsAcrylicBackdrop(rounded=False),
         wb.WindowsAcrylicBackdrop(rounded=True),
     ):
@@ -67,6 +68,37 @@ def test_backdrops_apply_remove_do_not_raise() -> None:
         backdrop.remove(widget)
 
     widget.deleteLater()
+
+
+def test_software_blur_backdrop_is_not_native() -> None:
+    # 软件截图模糊属于静态自绘，不算系统级实时模糊。
+    backdrop = wb.SoftwareBlurBackdrop()
+    assert backdrop.supports_native_blur() is False
+
+
+def test_acrylic_card_window_background_layer_fills_and_lowers() -> None:
+    from PySide6.QtWidgets import QWidget
+
+    app = _qt_app_or_skip()
+    from app.ui.acrylic_card_window import AcrylicCardWindow
+
+    content = QWidget()
+    background = QWidget()
+    card = AcrylicCardWindow(
+        content,
+        activatable=True,
+        backdrop=_RecordingBackdrop(),
+        background_layer=background,
+    )
+    # 背景层被 reparent 进卡片窗口，且不进 layout（由 resizeEvent 手动铺满）。
+    assert background.parentWidget() is card
+    card.show()
+    app.processEvents()
+    card.resize(320, 52)
+    app.processEvents()
+    assert background.geometry() == card.rect()
+
+    card.deleteLater()
 
 
 class _RecordingBackdrop:

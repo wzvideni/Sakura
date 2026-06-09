@@ -47,6 +47,29 @@ class StartupSettings:
     launch_at_login: bool = False
 
 
+BUBBLE_AUTO_HIDE_MIN_DELAY_SECONDS = 1
+BUBBLE_AUTO_HIDE_MAX_DELAY_SECONDS = 120
+BUBBLE_AUTO_HIDE_DEFAULT_DELAY_SECONDS = 5
+
+
+@dataclass(frozen=True)
+class BubbleSettings:
+    """对话气泡无操作自动隐藏配置。"""
+
+    auto_hide_enabled: bool = True
+    auto_hide_delay_seconds: int = BUBBLE_AUTO_HIDE_DEFAULT_DELAY_SECONDS
+
+    def normalized(self) -> "BubbleSettings":
+        delay = max(
+            BUBBLE_AUTO_HIDE_MIN_DELAY_SECONDS,
+            min(BUBBLE_AUTO_HIDE_MAX_DELAY_SECONDS, int(self.auto_hide_delay_seconds)),
+        )
+        return BubbleSettings(
+            auto_hide_enabled=bool(self.auto_hide_enabled),
+            auto_hide_delay_seconds=delay,
+        )
+
+
 @dataclass(frozen=True)
 class AppSettingsService:
     """集中管理运行配置；唯一持久化来源是 data/config/*.yaml。"""
@@ -325,6 +348,26 @@ class AppSettingsService:
                 "screen_context_batch_limit": int(normalized.screen_context_batch_limit),
             },
         )
+
+    def load_bubble_settings(self) -> BubbleSettings:
+        ui = self._system_section("ui")
+        return BubbleSettings(
+            auto_hide_enabled=_bool_value(ui.get("bubble_auto_hide_enabled"), True),
+            auto_hide_delay_seconds=_int_value(
+                ui.get("bubble_auto_hide_delay_seconds"),
+                BUBBLE_AUTO_HIDE_DEFAULT_DELAY_SECONDS,
+            ),
+        )
+
+    def save_bubble_settings(self, settings: BubbleSettings) -> None:
+        # 气泡配置位于 ui section 下，须读-改-写以保留 subtitle_language/theme 等其他 ui 键。
+        normalized = settings.normalized()
+        ui = self._system_section("ui")
+        ui["bubble_auto_hide_enabled"] = bool(normalized.auto_hide_enabled)
+        ui["bubble_auto_hide_delay_seconds"] = int(normalized.auto_hide_delay_seconds)
+        data = load_yaml_mapping(self.system_config_path)
+        data["ui"] = ui
+        save_yaml_mapping(self.system_config_path, data)
 
     def load_memory_curation_settings(self):
         from app.agent.memory_curator import MemoryCurationSettings
