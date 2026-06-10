@@ -1204,10 +1204,13 @@ class PetWindow(QWidget):
         # setGeometry 触发 resizeEvent → _layout_stage()，无需再手动调用
 
     def _ensure_stage_for_bubble_height(self, bubble_height: int) -> None:
-        """必要时扩大舞台以容纳气泡高度；若窗口已够高则只刷新布局，不触发缩小。
+        """必要时扩大舞台以容纳气泡高度；若窗口已够高则直接跳过，不触发缩小。
 
         以 self.height()（实际窗口高度）而非 stage_size 做比较，确保打字机过程中
         只增不减：避免新段初次溢出时目标尺寸小于上段残留的舞台而导致先缩后扩的闪现。
+        "don't grow" 路径不调用 _layout_stage，防止每行都触发 _reposition_child_windows
+        导致气泡窗口逐行抖动；配合段间不重置 _auto_fit_bubble_height，正常流程几乎不会
+        进入该分支。
         """
         new_size = _stage_size_for_layout(
             self.portrait_scale_percent,
@@ -1216,9 +1219,7 @@ class PetWindow(QWidget):
             self.input_bar_offset,
         )
         if new_size[1] <= self.height():
-            # 窗口已够高：只重布局气泡位置，保持 stage_size 不变，不触发缩小
-            self._layout_stage()
-            return
+            return  # 窗口已够高，不缩小，也不重布局（避免逐行抖动）
         self.stage_size = new_size
         self.portrait_controller.set_stage_size(new_size)
         self._resize_stage_anchor_bottom(new_size)
