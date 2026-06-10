@@ -76,6 +76,14 @@ class InputBarAnimator(QObject):
         self._apply_resting_state()
         self._poll_timer.start()
 
+    def set_before_show(self, callback: Callable[[], None] | None) -> None:
+        """按当前视觉效果模式动态替换显示前回调。
+
+        - 高斯模糊：_refresh_input_blur_background（截图桌面 + 模糊）
+        - 纯色块 / macOS 毛玻璃 / Windows 亚克力：None（无需截图）
+        """
+        self._before_show = callback
+
     def sync(self) -> None:
         """外部 pinned 状态（如待确认动作出现）变化时，立即重算可见性。"""
         self._sync()

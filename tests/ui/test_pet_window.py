@@ -19,10 +19,7 @@ from app.llm.chat_reply import ChatSegment
 from app.ui.portrait_utils import portrait_kind_key, should_crossfade_portrait
 from app.ui.theme import (
     DEFAULT_THEME_SETTINGS,
-    SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME,
-    SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME,
     ThemeSettings,
-    build_app_chrome_stylesheet,
     build_message_box_stylesheet,
     build_pet_window_stylesheet,
 )
@@ -1459,18 +1456,17 @@ priority: 10
 
 def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    qtcore = pytest.importorskip("PySide6.QtCore")
     qtwidgets = pytest.importorskip("PySide6.QtWidgets")
-    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QFrame", "QTabWidget")):
+    if not all(hasattr(qtwidgets, name) for name in ("QApplication", "QComboBox", "QTabWidget")):
         pytest.skip("当前测试环境只提供了 PySide6 stub。")
 
     from app.ui.settings_dialog import SettingsDialog
 
-    Qt = qtcore.Qt
     QApplication = qtwidgets.QApplication
-    QFrame = qtwidgets.QFrame
+    QComboBox = qtwidgets.QComboBox
     QTabWidget = qtwidgets.QTabWidget
     app = QApplication.instance() or QApplication([])
+    app_stylesheet_before = app.styleSheet()
     root = _ui_runtime_root("grouped_settings_tabs")
     dialog = SettingsDialog(
         api_settings=ApiSettings(
@@ -1500,13 +1496,14 @@ def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     assert dialog.height() >= 640
     assert "QWidget#settingsScrollViewport" in dialog.styleSheet()
     assert "QWidget#settingsPluginTab" in dialog.styleSheet()
+    assert "combobox-popup: 0;" in dialog.styleSheet()
     assert "QComboBox::drop-down" in dialog.styleSheet()
     assert "QComboBox::down-arrow" in dialog.styleSheet()
     assert "QComboBox QAbstractItemView" in dialog.styleSheet()
-    assert f"QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME}" in dialog.styleSheet()
-    assert f"QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}" in dialog.styleSheet()
     assert "QComboBox QAbstractItemView::item:selected" in dialog.styleSheet()
     assert "QComboBox QAbstractItemView::item:selected:!active" in dialog.styleSheet()
+    assert "QComboBoxPrivateContainer" not in dialog.styleSheet()
+    assert "settingsComboPopup" not in dialog.styleSheet()
     assert "QSpinBox::up-button" in dialog.styleSheet()
     assert "QSpinBox::down-button" in dialog.styleSheet()
     assert "QLineEdit:disabled" in dialog.styleSheet()
@@ -1514,23 +1511,18 @@ def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     assert "QComboBox:disabled" in dialog.styleSheet()
     assert "QSpinBox::up-button:disabled" in dialog.styleSheet()
     assert "QGroupBox QWidget" not in dialog.styleSheet()
-    assert dialog.character_combo.view().objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
-    assert dialog.model_edit.view().objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
-    assert dialog.model_edit.completer().popup().objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
-    assert dialog.tts_provider_combo.view().objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
-    assert app.styleSheet() == build_app_chrome_stylesheet(dialog.theme_settings)
+    assert isinstance(dialog.character_combo, QComboBox)
+    assert isinstance(dialog.model_edit, QComboBox)
+    assert isinstance(dialog.tts_provider_combo, QComboBox)
+    assert isinstance(dialog.theme_visual_effect_combo, QComboBox)
+    assert not hasattr(dialog.character_combo, "_popup_frame")
+    assert not hasattr(dialog.model_edit, "_popup_frame")
+    assert app.styleSheet() == app_stylesheet_before
 
+    combo_bottom = dialog.character_combo.mapToGlobal(dialog.character_combo.rect().bottomLeft()).y()
     dialog.character_combo.showPopup()
     app.processEvents()
-    popup_container = dialog.character_combo._popup_frame
-    popup_list = dialog.character_combo._popup_list
-    assert popup_container is not None
-    assert popup_list is not None
-    assert popup_container.objectName() == SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME
-    assert popup_container.frameShape() == QFrame.Shape.NoFrame
-    assert bool(popup_container.windowFlags() & Qt.WindowType.FramelessWindowHint)
-    assert bool(popup_container.windowFlags() & Qt.WindowType.NoDropShadowWindowHint)
-    assert popup_list.objectName() == SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME
+    assert dialog.character_combo.view().window().geometry().top() >= combo_bottom
     dialog.character_combo.hidePopup()
 
     dialog.deleteLater()
@@ -2319,12 +2311,56 @@ def test_settings_dialog_model_probe_populates_candidates_and_selects_first(monk
 
     assert dialog.model_edit.currentText() == "z-model"
     assert [dialog.model_edit.itemText(index) for index in range(dialog.model_edit.count())] == ["z-model", "a-model"]
-    dialog.model_edit.showPopup()
-    app.processEvents()
-    assert dialog.model_edit._popup_list is not None
-    assert dialog.model_edit._popup_list.count() == 2
-    dialog.model_edit.hidePopup()
+    assert not hasattr(dialog.model_edit, "_popup_list")
     assert infos and "2" in infos[0]
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_settings_dialog_model_popups_follow_current_theme_stylesheet() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    qtwidgets = pytest.importorskip("PySide6.QtWidgets")
+    if not hasattr(qtwidgets, "QApplication"):
+        pytest.skip("当前测试环境只提供了 PySide6 stub。")
+
+    from app.ui.settings_dialog import SettingsDialog
+    from app.ui.theme import rgba
+
+    themed = ThemeSettings(
+        input_background_color="#102030",
+        panel_background_color="#203040",
+        text_color="#ddeeff",
+    )
+    QApplication = qtwidgets.QApplication
+    app = QApplication.instance() or QApplication([])
+    root = _ui_runtime_root("api_model_popup_theme")
+    dialog = SettingsDialog(
+        api_settings=ApiSettings(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            model="",
+        ),
+        tts_settings=_minimal_tts_settings(),
+        base_dir=root,
+        **_settings_dialog_character_kwargs(root),
+        proactive_care_settings=ProactiveCareSettings(screen_context_enabled=True),
+        mcp_settings=MCPRuntimeSettings(windows_enabled=False),
+        theme_settings=themed,
+    )
+
+    dialog.model_edit.set_model_names(["alpha-model", "beta-model"])
+    stylesheet = dialog.styleSheet()
+
+    assert "QComboBox QAbstractItemView" in stylesheet
+    assert rgba("#102030", 246) in stylesheet
+    assert rgba(themed.primary_color, 43) in stylesheet
+    assert "#ddeeff" in stylesheet
+    assert [dialog.model_edit.itemText(index) for index in range(dialog.model_edit.count())] == [
+        "alpha-model",
+        "beta-model",
+    ]
+    assert not hasattr(dialog.model_edit, "_popup_list")
+
     dialog.deleteLater()
     app.processEvents()
 
@@ -6231,6 +6267,12 @@ def test_pet_window_apply_window_flags_syncs_native_topmost_state() -> None:
         def _schedule_native_topmost_sync(self) -> None:
             self.sync_count += 1
 
+        def _sync_card_window_topmost_flags(self) -> None:
+            pass
+
+        def _raise_foreground_controls(self) -> None:
+            pass
+
     window = MinimalWindow()
 
     window._apply_window_flags()
@@ -6264,6 +6306,12 @@ def test_pet_window_apply_window_flags_does_not_sync_native_state_before_visible
 
         def _schedule_native_topmost_sync(self) -> None:
             self.sync_count += 1
+
+        def _sync_card_window_topmost_flags(self) -> None:
+            pass
+
+        def _raise_foreground_controls(self) -> None:
+            pass
 
     window = MinimalWindow()
 
@@ -7181,6 +7229,83 @@ def test_pet_input_stylesheet_reduces_white_overlay() -> None:
     assert ", 90)" in focus_block
 
 
+def test_pet_input_stylesheet_has_solid_visual_effect_state() -> None:
+    stylesheet = build_pet_window_stylesheet(DEFAULT_THEME_SETTINGS)
+
+    assert '#inputBar[visualEffectMode="solid"]' in stylesheet
+    assert '#petInput[visualEffectMode="solid"]' in stylesheet
+    assert '#petInput[visualEffectMode="solid"]:focus' in stylesheet
+
+
+def test_pet_window_applies_visual_effect_dynamic_property() -> None:
+    _qt_app_or_skip()
+    from PySide6.QtWidgets import QFrame, QLineEdit
+
+    from app.ui.pet_window import PetWindow
+    from app.ui.window_backdrop import VisualEffectMode
+
+    window = PetWindow.__new__(PetWindow)
+    window.input_bar = QFrame()
+    window.input_edit = QLineEdit(window.input_bar)
+
+    PetWindow._apply_input_bar_visual_effect_property(window, VisualEffectMode.SOLID)
+
+    assert window.input_bar.property("visualEffectMode") == VisualEffectMode.SOLID
+    assert window.input_edit.property("visualEffectMode") == VisualEffectMode.SOLID
+
+    window.input_bar.deleteLater()
+
+
+def test_pet_window_removes_old_backdrop_before_hiding_visible_input_window(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    import app.ui.pet_window as pet_window_module
+    from app.ui.pet_window import PetWindow
+    from app.ui.theme import ThemeSettings
+    from app.ui.window_backdrop import VisualEffectMode
+
+    events: list[tuple[str, bool]] = []
+
+    class OldBackdrop:
+        def remove(self, window) -> None:  # type: ignore[no-untyped-def]
+            events.append(("remove", window.hidden))
+
+    class InputWindowStub:
+        def __init__(self) -> None:
+            self.hidden = False
+            self._backdrop = OldBackdrop()
+            self._background_layer = None
+
+        def isVisible(self) -> bool:  # noqa: N802 - Qt API 兼容命名。
+            return True
+
+        def hide(self) -> None:
+            self.hidden = True
+            events.append(("hide", self.hidden))
+
+        def show(self) -> None:
+            events.append(("show", self.hidden))
+
+    input_window = InputWindowStub()
+    window = PetWindow.__new__(PetWindow)
+    window.theme_settings = ThemeSettings(visual_effect_mode=VisualEffectMode.SOLID)
+    window.input_window = input_window
+    window.input_blur_background = None
+    window.input_bar_animator = None
+    monkeypatch.setattr(
+        pet_window_module.QApplication,
+        "processEvents",
+        lambda *args, **_kwargs: events.append(("process", input_window.hidden)),
+    )
+
+    PetWindow._sync_input_bar_backdrop(window)
+
+    assert events == [
+        ("remove", False),
+        ("hide", True),
+        ("process", True),
+        ("show", True),
+    ]
+
+
 def test_local_rect_to_global_keeps_size_and_uses_main_window_origin() -> None:
     _qt_app_or_skip()
     from PySide6.QtCore import QPoint, QRect
@@ -7300,3 +7425,71 @@ def test_subtitle_segment_pulse_creates_bubble_animation() -> None:
     controller.set_speech("一段台词", pulse=True)
 
     assert controller._bubble_fade_anim is not None
+
+
+def _make_character_profile(theme_settings: ThemeSettings | None, theme_source: str):  # type: ignore[no-untyped-def]
+    from app.config.character_loader import CharacterProfile
+
+    return CharacterProfile(
+        id="test",
+        display_name="Test",
+        package_dir=Path("."),
+        card_path=Path("card.md"),
+        initial_message="",
+        default_portrait_path=Path("portrait.png"),
+        theme_settings=theme_settings,
+        theme_source=theme_source,  # type: ignore[arg-type]
+    )
+
+
+def test_merge_theme_with_character_keeps_user_level_fields() -> None:
+    # 角色包主题只贡献配色；visual_effect_mode 和 ai_enabled 是用户级偏好，必须沿用已保存值。
+    from app.config.character_loader import THEME_SOURCE_PACKAGE
+    from app.ui.theme import merge_theme_with_character
+
+    saved = ThemeSettings(visual_effect_mode="macos_visual_effect", primary_color="#aa11bb", ai_enabled=True)
+    package_theme = ThemeSettings(primary_color="#123456")
+    profile = _make_character_profile(package_theme, THEME_SOURCE_PACKAGE)
+
+    merged = merge_theme_with_character(saved, profile)
+
+    assert merged.visual_effect_mode == "macos_visual_effect"
+    assert merged.ai_enabled is True
+    assert merged.primary_color == "#123456"
+
+
+def test_merge_theme_with_character_compat_default_returns_saved() -> None:
+    from app.config.character_loader import THEME_SOURCE_COMPAT_DEFAULT
+    from app.ui.theme import merge_theme_with_character
+
+    saved = ThemeSettings(visual_effect_mode="windows_acrylic", primary_color="#aa11bb")
+    profile = _make_character_profile(ThemeSettings(), THEME_SOURCE_COMPAT_DEFAULT)
+
+    merged = merge_theme_with_character(saved, profile)
+
+    assert merged.visual_effect_mode == "windows_acrylic"
+    assert merged.primary_color == "#aa11bb"
+
+
+def test_merge_theme_with_character_without_profile() -> None:
+    from app.ui.theme import merge_theme_with_character
+
+    saved = ThemeSettings(visual_effect_mode="solid")
+
+    assert merge_theme_with_character(saved, None).visual_effect_mode == "solid"
+
+
+def test_character_theme_round_trip_never_stores_visual_effect_mode() -> None:
+    # character.json 的 theme 块设计上不携带 visual_effect_mode（用户级/角色级分离）。
+    from app.config.character_loader import character_theme_from_mapping, character_theme_to_mapping
+
+    theme = ThemeSettings(primary_color="#123456", visual_effect_mode="macos_visual_effect")
+    mapping = character_theme_to_mapping(theme)
+
+    assert "visual_effect_mode" not in mapping
+
+    restored, source, missing = character_theme_from_mapping(mapping)
+    assert restored.visual_effect_mode == "gaussian_blur"
+    assert restored.primary_color == "#123456"
+    assert source == "package"
+    assert missing is False

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.config.character_loader import CharacterProfile
 
 
 DEFAULT_PRIMARY_COLOR = "#d55b91"
@@ -32,9 +35,6 @@ THEME_COLOR_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("bubble_background_color", "气泡背景色", DEFAULT_BUBBLE_BACKGROUND_COLOR),
     ("border_color", "边框色", DEFAULT_BORDER_COLOR),
 )
-SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME = "settingsComboPopupContainer"
-SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME = "settingsComboPopupView"
-
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -54,8 +54,11 @@ class ThemeSettings:
     bubble_background_color: str = DEFAULT_BUBBLE_BACKGROUND_COLOR
     border_color: str = DEFAULT_BORDER_COLOR
     ai_enabled: bool = False
+    visual_effect_mode: str = "gaussian_blur"
 
     def normalized(self) -> "ThemeSettings":
+        from app.ui.window_backdrop import VisualEffectMode
+
         return ThemeSettings(
             primary_color=normalize_hex_color(self.primary_color, DEFAULT_PRIMARY_COLOR),
             primary_hover_color=normalize_hex_color(self.primary_hover_color, DEFAULT_PRIMARY_HOVER_COLOR),
@@ -69,6 +72,7 @@ class ThemeSettings:
             bubble_background_color=normalize_hex_color(self.bubble_background_color, DEFAULT_BUBBLE_BACKGROUND_COLOR),
             border_color=normalize_hex_color(self.border_color, DEFAULT_BORDER_COLOR),
             ai_enabled=bool(self.ai_enabled),
+            visual_effect_mode=VisualEffectMode.validate(self.visual_effect_mode),
         )
 
 
@@ -94,19 +98,49 @@ def normalize_hex_color(value: object, default: str) -> str:
 
 
 def theme_from_mapping(data: Any) -> ThemeSettings:
+    from app.ui.window_backdrop import VisualEffectMode
+
     if not isinstance(data, dict):
         return DEFAULT_THEME_SETTINGS
     values = {
         field: normalize_hex_color(data.get(field), default)
         for field, _label, default in THEME_COLOR_FIELDS
     }
-    return ThemeSettings(**values, ai_enabled=_bool_value(data.get("ai_enabled"), False))
+    return ThemeSettings(
+        **values,
+        ai_enabled=_bool_value(data.get("ai_enabled"), False),
+        visual_effect_mode=VisualEffectMode.validate(str(data.get("visual_effect_mode", VisualEffectMode.DEFAULT))),
+    )
 
 
 def theme_to_mapping(settings: ThemeSettings) -> dict[str, object]:
     data = theme_colors_to_mapping(settings)
-    data["ai_enabled"] = bool(settings.normalized().ai_enabled)
+    normalized = settings.normalized()
+    data["ai_enabled"] = bool(normalized.ai_enabled)
+    data["visual_effect_mode"] = normalized.visual_effect_mode
     return data
+
+
+def merge_theme_with_character(
+    saved_settings: ThemeSettings,
+    profile: CharacterProfile | None,
+) -> ThemeSettings:
+    """合并已保存主题与角色包主题，保留用户级偏好字段。
+
+    角色包主题只贡献配色；visual_effect_mode 和 ai_enabled 是用户级偏好
+    （character.json 不序列化这两个字段），始终沿用已保存的值。
+    """
+    from app.config.character_loader import THEME_SOURCE_PACKAGE
+
+    saved = saved_settings.normalized()
+    if profile is not None and profile.theme_source == THEME_SOURCE_PACKAGE:
+        theme = (profile.theme_settings or DEFAULT_THEME_SETTINGS).normalized()
+        return replace(
+            theme,
+            visual_effect_mode=saved.visual_effect_mode,
+            ai_enabled=saved.ai_enabled,
+        )
+    return saved
 
 
 def theme_colors_to_mapping(settings: ThemeSettings) -> dict[str, object]:
@@ -222,6 +256,11 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
     background: transparent;
     border: none;
 }}
+#inputBar[visualEffectMode="solid"] {{
+    background: {rgba(theme.bubble_background_color, 238)};
+    border: 1px solid {rgba(theme.border_color, 170)};
+    border-radius: 22px;
+}}
 #petInput {{
     background: {rgba(theme.input_background_color, 55)};
     border: 1px solid rgba(255, 255, 255, 218);
@@ -232,8 +271,16 @@ def build_pet_window_stylesheet(settings: ThemeSettings) -> str:
     padding: 3px 16px;
     selection-background-color: {rgba(theme.primary_color, 92)};
 }}
+#petInput[visualEffectMode="solid"] {{
+    background: {rgba(theme.input_background_color, 235)};
+    border: 1px solid {rgba(theme.border_color, 148)};
+}}
 #petInput:focus {{
     background: {rgba(theme.input_background_color, 90)};
+    border: 1px solid {rgba(theme.primary_color, 210)};
+}}
+#petInput[visualEffectMode="solid"]:focus {{
+    background: {theme.input_background_color};
     border: 1px solid {rgba(theme.primary_color, 210)};
 }}
 #petInput:disabled {{
@@ -440,6 +487,7 @@ QLineEdit[readOnly="true"] {{
     selection-background-color: transparent;
 }}
 QComboBox {{
+    combobox-popup: 0;
     padding: 6px 30px 6px 8px;
 }}
 QComboBox::drop-down {{
@@ -463,24 +511,9 @@ QComboBox::down-arrow {{
     width: 12px;
     height: 12px;
 }}
-QComboBoxPrivateContainer {{
-    background: transparent;
-    border: none;
-    padding: 0;
-    margin: 0;
-}}
-QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} {{
+QComboBox QAbstractItemView {{
     background: {rgba(theme.input_background_color, 246)};
-    border: none;
-    border-radius: 7px;
-    padding: 2px;
-}}
-QComboBox QAbstractItemView,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME},
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME},
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
-    background: {rgba(theme.input_background_color, 246)};
-    border: none;
+    border: 1px solid {rgba(theme.border_color, 158)};
     border-radius: 7px;
     color: {theme.text_color};
     font-size: 14px;
@@ -489,43 +522,17 @@ QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
     selection-background-color: {rgba(theme.panel_background_color, 220)};
     selection-color: {theme.text_color};
 }}
-QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
-    background: transparent;
-}}
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport {{
-    background: {rgba(theme.input_background_color, 246)};
-}}
-QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport {{
-    background: transparent;
-}}
-QComboBox QAbstractItemView::item,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item {{
+QComboBox QAbstractItemView::item {{
     min-height: 22px;
     padding: 3px 8px;
     border-radius: 5px;
 }}
-QComboBox QAbstractItemView::item:hover,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover {{
+QComboBox QAbstractItemView::item:hover {{
     background: {rgba(theme.panel_background_color, 185)};
 }}
 QComboBox QAbstractItemView::item:selected,
 QComboBox QAbstractItemView::item:selected:active,
-QComboBox QAbstractItemView::item:selected:!active,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active {{
+QComboBox QAbstractItemView::item:selected:!active {{
     background: {rgba(theme.primary_color, 43)};
     color: {theme.text_color};
 }}
@@ -618,11 +625,7 @@ QPushButton:disabled {{
 
 
 def build_app_chrome_stylesheet(settings: ThemeSettings) -> str:
-    """全局应用级样式：美化下拉弹窗(QComboBox 弹出列表)与滚动条。
-
-    这些控件的弹出/绘制是独立顶层，对话框级 setStyleSheet 传播不到；且 main.py 用 Fusion 风格
-    后系统原生外观失效。所以必须在 QApplication 级统一设置，才能让它们跟随主题。
-    """
+    """全局应用级样式：美化滚动条与菜单等独立顶层控件。"""
     theme = settings.normalized()
     return f"""
 QScrollBar:vertical {{
@@ -689,71 +692,6 @@ QMenu::separator {{
     height: 1px;
     background: {rgba(theme.border_color, 105)};
     margin: 3px 7px;
-}}
-QComboBoxPrivateContainer {{
-    background: transparent;
-    border: none;
-    padding: 0;
-    margin: 0;
-}}
-QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} {{
-    background: {rgba(theme.input_background_color, 246)};
-    border: none;
-    border-radius: 7px;
-    padding: 2px;
-}}
-QComboBox QAbstractItemView,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME},
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME},
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
-    background: {rgba(theme.input_background_color, 246)};
-    border: none;
-    border-radius: 7px;
-    color: {theme.text_color};
-    outline: 0;
-    padding: 2px;
-    selection-background-color: {rgba(theme.panel_background_color, 220)};
-    selection-color: {theme.text_color};
-}}
-QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} {{
-    background: transparent;
-}}
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport {{
-    background: {rgba(theme.input_background_color, 246)};
-}}
-QFrame#{SETTINGS_COMBO_POPUP_CONTAINER_OBJECT_NAME} QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME} QWidget#qt_scrollarea_viewport {{
-    background: transparent;
-}}
-QComboBox QAbstractItemView::item,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item {{
-    min-height: 22px;
-    padding: 3px 8px;
-    border-radius: 5px;
-}}
-QComboBox QAbstractItemView::item:hover,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:hover {{
-    background: {rgba(theme.panel_background_color, 185)};
-}}
-QComboBox QAbstractItemView::item:selected,
-QComboBox QAbstractItemView::item:selected:active,
-QComboBox QAbstractItemView::item:selected:!active,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
-QAbstractItemView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
-QListView#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:active,
-QListWidget#{SETTINGS_COMBO_POPUP_VIEW_OBJECT_NAME}::item:selected:!active {{
-    background: {rgba(theme.primary_color, 70)};
-    color: {theme.text_color};
 }}
 """
 

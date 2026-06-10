@@ -72,5 +72,5 @@ class AcrylicCardWindow(QWidget):
 
     def showEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().showEvent(event)
-        # winId 在 show 之后才有效，此时施加亚克力最稳。圆角由 backdrop 内部的 DWM 原生圆角负责。
+        # winId 在 show 之后才有效，此时施加 backdrop 最稳。
         self._backdrop.apply(self, self._tint)

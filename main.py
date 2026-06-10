@@ -5,7 +5,7 @@ import ctypes
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot, QtMsgType, qInstallMessageHandler
 from PySide6.QtGui import QGuiApplication, QPalette, QColor
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QStyleFactory
 
@@ -40,6 +40,15 @@ from app.voice.tts_bundle import (
 
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def _qt_message_handler(msg_type: QtMsgType, context: object, msg: str) -> None:
+    # Windows 无边框透明窗口触发的无害 DWM 边框设置警告，直接丢弃
+    if "setDarkBorderToWindow" in msg:
+        return
+    print(msg, file=sys.stderr)
+    if msg_type == QtMsgType.QtFatalMsg:
+        sys.exit(1)
 
 
 def _force_light_palette(app: QApplication) -> None:
@@ -240,6 +249,7 @@ class TTSBundleMigrationDialog(QDialog):
 
 
 def main() -> int:
+    qInstallMessageHandler(_qt_message_handler)
     _configure_windows_high_dpi()
     app = QApplication(sys.argv)
     app.setApplicationName("Sakura Desktop Pet")

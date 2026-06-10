@@ -76,6 +76,32 @@ def test_software_blur_backdrop_is_not_native() -> None:
     assert backdrop.supports_native_blur() is False
 
 
+def test_windows_acrylic_remove_resets_native_corner_preference(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class WindowStub:
+        def winId(self) -> int:  # noqa: N802 - Qt API 兼容命名。
+            return 12345
+
+    calls: list[tuple[str, int, int]] = []
+    backdrop = wb.WindowsAcrylicBackdrop(rounded=True)
+    monkeypatch.setattr(
+        backdrop,
+        "_set_accent",
+        lambda hwnd, state, _tint: calls.append(("accent", hwnd, state)),
+    )
+    monkeypatch.setattr(
+        backdrop,
+        "_set_corner_preference",
+        lambda hwnd, value: calls.append(("corner", hwnd, value)),
+    )
+
+    backdrop.remove(WindowStub())  # type: ignore[arg-type]
+
+    assert calls == [
+        ("accent", 12345, backdrop._ACCENT_DISABLED),  # noqa: SLF001
+        ("corner", 12345, backdrop._DWMWCP_DONOTROUND),  # noqa: SLF001
+    ]
+
+
 def test_acrylic_card_window_background_layer_fills_and_lowers() -> None:
     from PySide6.QtWidgets import QWidget
 
