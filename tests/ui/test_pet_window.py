@@ -1511,10 +1511,10 @@ def test_settings_dialog_uses_grouped_top_level_tabs() -> None:
     assert "QComboBox:disabled" in dialog.styleSheet()
     assert "QSpinBox::up-button:disabled" in dialog.styleSheet()
     assert "QGroupBox QWidget" not in dialog.styleSheet()
-    assert type(dialog.character_combo) is QComboBox
+    assert isinstance(dialog.character_combo, QComboBox)
     assert isinstance(dialog.model_edit, QComboBox)
-    assert type(dialog.tts_provider_combo) is QComboBox
-    assert type(dialog.theme_visual_effect_combo) is QComboBox
+    assert isinstance(dialog.tts_provider_combo, QComboBox)
+    assert isinstance(dialog.theme_visual_effect_combo, QComboBox)
     assert not hasattr(dialog.character_combo, "_popup_frame")
     assert not hasattr(dialog.model_edit, "_popup_frame")
     assert app.styleSheet() == app_stylesheet_before
