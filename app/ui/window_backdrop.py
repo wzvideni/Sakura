@@ -124,16 +124,22 @@ class MacOSVisualEffectBackdrop:
 
             win_id = int(window.winId())
             root_view = objc.objc_object(c_void_p=c_void_p(win_id))
-            ns_window = root_view.window()
-            if ns_window is None:
-                self._fallback.apply(window, tint)
-                return
-            content_view = ns_window.contentView()
-            if content_view is None:
+
+            # root_view (QNSView) 自身就是 contentView。
+            # 若把 NSVisualEffectView 添加为 contentView 的子视图，它在 Qt 直接绘制
+            # 内容之上会遮挡所有文字和控件。
+            # 必须添加到 root_view 的父视图（NSNextStepFrame），排在 root_view 之下。
+            superview = root_view.superview()
+            if superview is None:
                 self._fallback.apply(window, tint)
                 return
 
-            frame = NSMakeRect(0, 0, float(window.width()), float(window.height()))
+            # 对齐 root_view 在其父视图中的位置和尺寸（root_view 可能不在 (0,0)）
+            rv_frame = root_view.frame()
+            frame = NSMakeRect(
+                rv_frame.origin.x, rv_frame.origin.y,
+                rv_frame.size.width, rv_frame.size.height,
+            )
             effect_view = NSVisualEffectView.alloc().initWithFrame_(frame)
             if effect_view is None:
                 self._fallback.apply(window, tint)
@@ -145,9 +151,10 @@ class MacOSVisualEffectBackdrop:
             effect_view.setAutoresizingMask_(2 | 16)
             effect_view.setWantsLayer_(True)
 
-            # 直接添加到 contentView 最底层
-            content_view.addSubview_positioned_relativeTo_(
-                effect_view, self._NS_WINDOW_BELOW, None,
+            # sibling injection: 插入到 root_view 下面，Qt 内容透过
+            # WA_TranslucentBackground 的透明区域可见毛玻璃
+            superview.addSubview_positioned_relativeTo_(
+                effect_view, self._NS_WINDOW_BELOW, root_view,
             )
 
             self._effect_view = effect_view
