@@ -150,6 +150,8 @@ class MacOSVisualEffectBackdrop:
             effect_view.setState_(self._STATE)
             effect_view.setAutoresizingMask_(2 | 16)
             effect_view.setWantsLayer_(True)
+            # 与 InputBlurBackground 的 corner_radius 保持一致
+            effect_view.setCornerRadius_(22.0)
 
             # sibling injection: 插入到 root_view 下面，Qt 内容透过
             # WA_TranslucentBackground 的透明区域可见毛玻璃
