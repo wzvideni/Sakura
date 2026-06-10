@@ -7041,22 +7041,22 @@ def _minimal_settings_window(pet_window_cls, settings_service, api_client, memor
         def _create_tts_provider_from_settings(self, _settings):  # type: ignore[no-untyped-def]
             return object()
 
-        def _apply_portrait_scale_percent(self, percent: int) -> None:
-            self.portrait_scale_percent = percent
-
-        def _apply_control_panel_layout(  # type: ignore[no-untyped-def]
+        def _apply_layout_settings(  # type: ignore[no-untyped-def]
             self,
+            *,
+            portrait_scale_percent,
             control_panel_width,
             bubble_height,
             vertical_offset,
             input_bar_offset,
-            *,
-            persist: bool = True,
+            persist: bool,
         ) -> None:
+            self.portrait_scale_percent = portrait_scale_percent
             self.control_panel_width = control_panel_width
             self.bubble_height = bubble_height
             self.control_panel_vertical_offset = vertical_offset
             self.input_bar_offset = input_bar_offset
+            self.layout_persisted = persist
 
         def _sync_proactive_care_timer(self) -> None:
             pass

@@ -3239,12 +3239,13 @@ class PetWindow(QWidget):
         if api_changed:
             self.api_client.update_settings(dialog.result_api_settings)
             self.memory_store.reload_api_settings(dialog.result_api_settings, wait=False)
-        self._apply_portrait_scale_percent(dialog.result_portrait_scale_percent)
-        self._apply_control_panel_layout(
-            result_control_panel_width,
-            result_bubble_height,
-            result_control_panel_vertical_offset,
-            result_input_bar_offset,
+        self._apply_layout_settings(
+            portrait_scale_percent=dialog.result_portrait_scale_percent,
+            control_panel_width=result_control_panel_width,
+            bubble_height=result_bubble_height,
+            vertical_offset=result_control_panel_vertical_offset,
+            input_bar_offset=result_input_bar_offset,
+            persist=True,
         )
         self._apply_subtitle_display_speed(
             result_subtitle_typing_interval_ms,
@@ -3711,56 +3712,53 @@ class PetWindow(QWidget):
         # 单窗口重构后只有主窗口一个顶层窗口，置顶仅作用于它。
         return [self]
 
-    def _apply_portrait_scale_percent(self, portrait_scale_percent: int) -> None:
-        # 缩放前先锁定立绘底边的屏幕点：缩放后以它为锚点，立绘底边不动、只从底边向上缩放。
-        anchor = self._portrait_anchor_global()
-        self.portrait_scale_percent = normalize_portrait_scale_percent(portrait_scale_percent)
-        self.portrait_controller.set_portrait_scale_percent(self.portrait_scale_percent)
-        # 全程抑帧：apply_current 会先按新缩放重贴立绘并触发一次 _layout_stage，
-        # 若不抑帧，这次会在「旧窗口几何 + 新立绘尺寸」下摆出一帧错位（缩放抖动）。
-        # 把重贴与统一布局收口到同一抑制区间，最终只呈现一帧。
-        was_enabled = self.updatesEnabled()
-        self.setUpdatesEnabled(False)
-        try:
-            self.portrait_controller.apply_current()
-            self._apply_pet_layout(anchor_global=anchor)
-        finally:
-            self.setUpdatesEnabled(was_enabled)
-
-    def _apply_control_panel_layout(
+    def _apply_layout_settings(
         self,
+        *,
+        portrait_scale_percent: object,
         control_panel_width: object,
         bubble_height: object,
         vertical_offset: object,
         input_bar_offset: object,
-        *,
-        persist: bool = True,
+        persist: bool,
     ) -> None:
-        """应用控制组宽度/气泡高度/上下偏移/输入栏下移：归一化 → 更新状态 → 重算舞台并重新布局，可选持久化。"""
+        """一次性应用「立绘缩放 + 控制组布局」：归一化 → 锁定立绘底边锚点 → 更新状态（含按需重贴立绘）
+        → 单次统一布局（一次 setGeometry，全程抑帧）。persist=True 时无条件持久化控制组布局。
+
+        合并为单次几何提交，是为了消除「缩放」「控制组」两步各自 setGeometry 造成的窗口二次跳动
+        ——setUpdatesEnabled 只压 Qt 重绘，压不住 OS 层窗口移动，两次 setGeometry 会被合成出抖动。
+        持久化不再依赖 changed 判定：预览阶段已把内存值改写为新值，点确定时若按 changed 判断会被
+        当作未变更而漏存，导致重开丢失气泡/输入栏调整。
+        """
+        next_scale = normalize_portrait_scale_percent(portrait_scale_percent)
         next_width = normalize_control_panel_width(control_panel_width)
         next_bubble_height = normalize_bubble_height(bubble_height)
         next_offset = normalize_control_panel_vertical_offset(vertical_offset)
         next_input_offset = normalize_input_bar_offset(input_bar_offset)
-        changed = (
-            next_width != self.control_panel_width
-            or next_bubble_height != self.bubble_height
-            or next_offset != self.control_panel_vertical_offset
-            or next_input_offset != self.input_bar_offset
-        )
-        # 改布局前锁定立绘底边屏幕点，确保调气泡高度/输入栏下移/控制组偏移时立绘不动。
+
+        # 在任何状态变更之前锁定立绘底边的屏幕点，保证缩放/调参后立绘站位不动。
         anchor = self._portrait_anchor_global()
-        self.control_panel_width = next_width
-        self.bubble_height = next_bubble_height
-        self.control_panel_vertical_offset = next_offset
-        self.input_bar_offset = next_input_offset
-        # 用户设置值作为气泡高度下限：
-        # - 若新设置 >= 当前自适应高度，清除自适应，使用用户值；
-        # - 若新设置 < 当前自适应高度，保留自适应状态不触发视觉变更，
-        #   等用户拖到超过自适应高度时再接管，避免拖动时错位。
-        if self._auto_fit_bubble_height is not None and next_bubble_height >= self._auto_fit_bubble_height:
-            self._auto_fit_bubble_height = None
-        self._apply_pet_layout(anchor_global=anchor)
-        if changed and persist:
+        scale_changed = next_scale != self.portrait_scale_percent
+
+        was_enabled = self.updatesEnabled()
+        self.setUpdatesEnabled(False)
+        try:
+            self.portrait_scale_percent = next_scale
+            self.control_panel_width = next_width
+            self.bubble_height = next_bubble_height
+            self.control_panel_vertical_offset = next_offset
+            self.input_bar_offset = next_input_offset
+            # 用户设置值作为气泡高度下限：新设置 >= 当前自适应高度时清除自适应，回归用户值；
+            # 新设置 < 自适应高度时保留自适应，等拖过自适应高度再接管，避免拖动错位。
+            if self._auto_fit_bubble_height is not None and next_bubble_height >= self._auto_fit_bubble_height:
+                self._auto_fit_bubble_height = None
+            if scale_changed:
+                self.portrait_controller.set_portrait_scale_percent(next_scale)
+                self.portrait_controller.apply_current()  # 按新缩放重贴立绘（抑帧中，无中间帧）
+            self._apply_pet_layout(anchor_global=anchor)  # 单次 setGeometry
+        finally:
+            self.setUpdatesEnabled(was_enabled)
+        if persist:
             self._save_control_panel_layout()
 
     def _save_control_panel_layout(self) -> None:
@@ -3785,13 +3783,13 @@ class PetWindow(QWidget):
         vertical_offset: object,
         input_bar_offset: object,
     ) -> None:
-        """设置对话框滑块拖动时的实时预览：立绘缩放 + 控制组布局立即应用到界面但不持久化。"""
-        self._apply_portrait_scale_percent(normalize_portrait_scale_percent(portrait_scale_percent))
-        self._apply_control_panel_layout(
-            control_panel_width,
-            bubble_height,
-            vertical_offset,
-            input_bar_offset,
+        """设置对话框滑块拖动时的实时预览：立绘缩放 + 控制组布局以单次几何提交立即应用，不持久化。"""
+        self._apply_layout_settings(
+            portrait_scale_percent=portrait_scale_percent,
+            control_panel_width=control_panel_width,
+            bubble_height=bubble_height,
+            vertical_offset=vertical_offset,
+            input_bar_offset=input_bar_offset,
             persist=False,
         )
 
