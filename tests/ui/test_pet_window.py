@@ -7430,54 +7430,41 @@ def _make_character_profile(theme_settings: ThemeSettings | None, theme_source: 
     )
 
 
-def test_theme_settings_for_character_keeps_user_visual_effect_mode() -> None:
-    # 角色包主题只贡献配色；visual_effect_mode 是用户级偏好，必须沿用已保存值。
+def test_merge_theme_with_character_keeps_user_level_fields() -> None:
+    # 角色包主题只贡献配色；visual_effect_mode 和 ai_enabled 是用户级偏好，必须沿用已保存值。
     from app.config.character_loader import THEME_SOURCE_PACKAGE
-    from app.ui.pet_window import _theme_settings_for_character
+    from app.ui.theme import merge_theme_with_character
 
-    saved = ThemeSettings(visual_effect_mode="macos_visual_effect", primary_color="#aa11bb")
+    saved = ThemeSettings(visual_effect_mode="macos_visual_effect", primary_color="#aa11bb", ai_enabled=True)
     package_theme = ThemeSettings(primary_color="#123456")
     profile = _make_character_profile(package_theme, THEME_SOURCE_PACKAGE)
 
-    merged = _theme_settings_for_character(saved, profile)
+    merged = merge_theme_with_character(saved, profile)
 
     assert merged.visual_effect_mode == "macos_visual_effect"
+    assert merged.ai_enabled is True
     assert merged.primary_color == "#123456"
 
 
-def test_theme_settings_for_character_compat_default_returns_saved() -> None:
+def test_merge_theme_with_character_compat_default_returns_saved() -> None:
     from app.config.character_loader import THEME_SOURCE_COMPAT_DEFAULT
-    from app.ui.pet_window import _theme_settings_for_character
+    from app.ui.theme import merge_theme_with_character
 
     saved = ThemeSettings(visual_effect_mode="windows_acrylic", primary_color="#aa11bb")
     profile = _make_character_profile(ThemeSettings(), THEME_SOURCE_COMPAT_DEFAULT)
 
-    merged = _theme_settings_for_character(saved, profile)
+    merged = merge_theme_with_character(saved, profile)
 
     assert merged.visual_effect_mode == "windows_acrylic"
     assert merged.primary_color == "#aa11bb"
 
 
-def test_settings_dialog_theme_settings_for_character_keeps_user_visual_effect_mode() -> None:
-    from app.config.character_loader import THEME_SOURCE_PACKAGE
-    from app.ui.settings_dialog import _theme_settings_for_character
-
-    saved = ThemeSettings(visual_effect_mode="macos_visual_effect")
-    package_theme = ThemeSettings(primary_color="#123456")
-    profile = _make_character_profile(package_theme, THEME_SOURCE_PACKAGE)
-
-    merged = _theme_settings_for_character(saved, profile)
-
-    assert merged.visual_effect_mode == "macos_visual_effect"
-    assert merged.primary_color == "#123456"
-
-
-def test_settings_dialog_theme_settings_for_character_without_profile() -> None:
-    from app.ui.settings_dialog import _theme_settings_for_character
+def test_merge_theme_with_character_without_profile() -> None:
+    from app.ui.theme import merge_theme_with_character
 
     saved = ThemeSettings(visual_effect_mode="solid")
 
-    assert _theme_settings_for_character(saved, None).visual_effect_mode == "solid"
+    assert merge_theme_with_character(saved, None).visual_effect_mode == "solid"
 
 
 def test_character_theme_round_trip_never_stores_visual_effect_mode() -> None:

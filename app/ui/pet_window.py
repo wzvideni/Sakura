@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -164,6 +163,7 @@ from app.ui.theme import (
     ThemeSettings,
     build_app_chrome_stylesheet,
     build_message_box_stylesheet,
+    merge_theme_with_character,
 )
 from app.voice import VoicePlaybackController
 
@@ -357,7 +357,7 @@ class PetWindow(QWidget):
         self.mcp_settings = context.mcp_settings
         self.debug_log_settings = context.debug_log_settings
         self.startup_settings = context.startup_settings
-        self.theme_settings = _theme_settings_for_character(
+        self.theme_settings = merge_theme_with_character(
             self.settings_service.load_theme_settings(),
             self.character_profile,
         )
@@ -4294,19 +4294,6 @@ def _same_optional_path(left: Path | None, right: Path | None) -> bool:
 
 def _should_write_character_theme(theme_write_mode: object, profile: CharacterProfile) -> bool:
     return theme_write_mode in {"manual", "ai"}
-
-
-def _theme_settings_for_character(
-    saved_settings: ThemeSettings,
-    profile: CharacterProfile,
-) -> ThemeSettings:
-    saved = saved_settings.normalized()
-    if profile.theme_source == THEME_SOURCE_PACKAGE:
-        # 角色包主题只贡献配色；visual_effect_mode 是用户级偏好
-        # （character.json 不存储该键），沿用已保存的视觉效果。
-        theme = (profile.theme_settings or DEFAULT_THEME_SETTINGS).normalized()
-        return replace(theme, visual_effect_mode=saved.visual_effect_mode)
-    return saved
 
 
 def _mark_dialog_always_on_top(window) -> None:  # type: ignore[no-untyped-def]

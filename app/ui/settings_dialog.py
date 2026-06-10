@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Literal
@@ -135,6 +134,7 @@ from app.ui.theme import (
     ThemeSettings,
     build_color_button_stylesheet,
     build_settings_dialog_stylesheet,
+    merge_theme_with_character,
     normalize_hex_color,
     mix,
     parse_ai_theme_response,
@@ -420,7 +420,7 @@ class SettingsDialog(QDialog):
         self._initial_api_settings = api_settings
         self._initial_tts_settings = tts_settings
         self._initial_character_id = current_character.id if current_character is not None else None
-        self.theme_settings = _theme_settings_for_character(
+        self.theme_settings = merge_theme_with_character(
             theme_settings or DEFAULT_THEME_SETTINGS,
             current_character,
         )
@@ -2024,6 +2024,8 @@ class SettingsDialog(QDialog):
                 combo = getattr(self, "theme_visual_effect_combo", None)
                 if combo is not None:
                     idx = combo.findData(theme.visual_effect_mode)
+                    if idx < 0:
+                        idx = combo.findData(VisualEffectMode.GAUSSIAN_BLUR)
                     if idx >= 0:
                         combo.setCurrentIndex(idx)
         finally:
@@ -3057,19 +3059,6 @@ class SettingsDialog(QDialog):
 def _is_http_url(url: str) -> bool:
     parsed_url = urlparse(url)
     return parsed_url.scheme in {"http", "https"} and bool(parsed_url.netloc)
-
-
-def _theme_settings_for_character(
-    settings: ThemeSettings,
-    profile: CharacterProfile | None,
-) -> ThemeSettings:
-    saved = settings.normalized()
-    if profile is not None and profile.theme_source == THEME_SOURCE_PACKAGE:
-        # 角色包主题只贡献配色；visual_effect_mode 是用户级偏好
-        # （character.json 不存储该键），沿用已保存的视觉效果。
-        theme = (profile.theme_settings or DEFAULT_THEME_SETTINGS).normalized()
-        return replace(theme, visual_effect_mode=saved.visual_effect_mode)
-    return saved
 
 
 def _default_tts_api_url(provider: str) -> str:
