@@ -616,9 +616,10 @@ class PetWindow(QWidget):
         bubble_layout.setSpacing(0)
         bubble_layout.addLayout(bubble_body_layout, 1)
         self.bubble.setLayout(bubble_layout)
-        # 气泡为「窗口内」卡片容器（单窗口重构）：作为主窗口子控件随其单帧合成，不再是独立 HWND，
-        # 圆角与底色由 #speechBubble 的 QSS 大圆角 + 较高 alpha 背景负责（主窗口样式表级联，保证文字可读）。
-        self.bubble_card = CardContainer(self.bubble, parent=self)
+        # 气泡为主窗口直接子控件（单窗口重构）：随主窗口单帧合成，不再是独立 HWND。
+        # 不额外包容器——浮现脉冲与自动隐藏淡入淡出共用同一个 bubble_opacity_effect，
+        # 避免「容器 effect + 内容 effect」嵌套触发 QPainter 冲突（破帧/元素消失）。
+        # 圆角与底色由 #speechBubble 的 QSS 负责（主窗口样式表级联）。
 
         self.input_bar = QFrame(self)
         self.input_bar.setObjectName("inputBar")
@@ -681,9 +682,10 @@ class PetWindow(QWidget):
         )
         # 气泡无操作自动隐藏控制器：说完话后倒计时，悬停桌宠暂停，超时淡出，点击桌宠唤回。
         self.bubble_settings = self.settings_service.load_bubble_settings()
+        # 自动隐藏复用气泡自身的 opacity effect（与浮现脉冲同一个，二者时间互斥），不再嵌套容器 effect。
         self.bubble_auto_hide = BubbleAutoHideController(
-            self.bubble_card,
-            self.bubble_card.fade_effect,
+            self.bubble,
+            self.bubble_opacity_effect,
             self._cursor_in_pet_region,
             enabled=self.bubble_settings.auto_hide_enabled,
             delay_seconds=self.bubble_settings.auto_hide_delay_seconds,
@@ -733,8 +735,8 @@ class PetWindow(QWidget):
         super().showEvent(event)
         # 子控件随主窗口显示；此处只需把它们摆到位并启动动画/自动隐藏。
         self._layout_stage()
-        if hasattr(self, "bubble_card"):
-            self.bubble_card.show()
+        if hasattr(self, "bubble"):
+            self.bubble.show()
         if hasattr(self, "input_bar_animator"):
             self.input_bar_animator.start()
         if hasattr(self, "bubble_auto_hide"):
@@ -1111,8 +1113,8 @@ class PetWindow(QWidget):
 
     def _raise_foreground_controls(self) -> None:
         # 子控件 z 序：气泡/输入栏需浮在立绘之上。
-        if hasattr(self, "bubble_card"):
-            self.bubble_card.raise_()
+        if hasattr(self, "bubble"):
+            self.bubble.raise_()
         if hasattr(self, "input_card"):
             self.input_card.raise_()
         self._raise_open_dialogs()
@@ -1216,14 +1218,14 @@ class PetWindow(QWidget):
             self.setUpdatesEnabled(True)
 
     def _place_pet_children(self, layout: PetLayout) -> None:
-        """按布局把立绘/气泡卡片/输入栏卡片摆到窗口本地坐标（不改窗口尺寸）。"""
+        """按布局把立绘/气泡/输入栏卡片摆到窗口本地坐标（不改窗口尺寸）。"""
         if not hasattr(self, "input_card"):
             return
         px, py, pw, ph = layout.portrait_rect
         self.label.setGeometry(px, py, pw, ph)
         self.portrait_transition_label.setGeometry(px, py, pw, ph)
         bx, by, bw, bh = layout.bubble_rect
-        self.bubble_card.setGeometry(bx, by, bw, bh)
+        self.bubble.setGeometry(bx, by, bw, bh)
         ix, iy, iw, ih = layout.input_rect
         self.input_card.setGeometry(ix, iy, iw, ih)
         # 软件模糊背景截图需要输入栏/气泡的窗口本地矩形（转全局），此处缓存。

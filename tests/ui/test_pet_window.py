@@ -7452,6 +7452,8 @@ def test_input_bar_animator_send_feedback_starts_animation() -> None:
     effect = QGraphicsOpacityEffect(card)
     animator = InputBarAnimator(bar, card, effect, lambda: False, lambda: False)
 
+    # 脉冲复用卡片 effect，仅在卡片可见时触发。
+    animator._shown = True
     animator.play_send_feedback()
     assert animator._send_anim is not None
 

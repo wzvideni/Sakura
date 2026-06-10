@@ -50,11 +50,6 @@ class InputBarAnimator(QObject):
         # 显示前回调：输入栏现身前刷新软件模糊背景截图（截正后方桌面），避免现身后才换背景闪一下。
         self._before_show = before_show
 
-        # 仅用于发送脉冲：让输入栏内容做一次"暗-亮"，与窗口级 hover 淡入淡出分离。
-        self._bar_effect = QGraphicsOpacityEffect(input_bar)
-        self._bar_effect.setOpacity(1.0)
-        input_bar.setGraphicsEffect(self._bar_effect)
-
         self._hover = False
         self._shown = False
         self._started = False
@@ -148,6 +143,11 @@ class InputBarAnimator(QObject):
             self._anim.stop()
             self._anim.deleteLater()
             self._anim = None
+        # 淡入淡出与发送脉冲共用同一个 _card_effect：开始淡入淡出时取消进行中的脉冲，避免两动画相互打架。
+        if self._send_anim is not None:
+            self._send_anim.stop()
+            self._send_anim.deleteLater()
+            self._send_anim = None
         if show:
             self._maybe_before_show()
             self._input_card.show()
@@ -180,16 +180,19 @@ class InputBarAnimator(QObject):
             self._input_card.hide()
 
     def play_send_feedback(self) -> None:
-        """发送时让输入栏内容做一次轻微"暗-亮"脉冲作为反馈。"""
+        """发送时让输入栏卡片做一次轻微"暗-亮"脉冲作为反馈（复用 _card_effect，不再单独挂内容 effect）。"""
+        # 卡片不可见时不脉冲，避免把隐藏的输入栏短暂闪出。
+        if not self._shown:
+            return
         if self._send_anim is not None:
             self._send_anim.stop()
             self._send_anim.deleteLater()
         # dim 不设 startValue，从当前透明度起步，避免突跳。
-        dim = QPropertyAnimation(self._bar_effect, b"opacity")
+        dim = QPropertyAnimation(self._card_effect, b"opacity")
         dim.setDuration(SEND_PULSE_HALF_MS)
         dim.setEndValue(SEND_PULSE_DIP_OPACITY)
         dim.setEasingCurve(QEasingCurve.Type.InOutQuad)
-        restore = QPropertyAnimation(self._bar_effect, b"opacity")
+        restore = QPropertyAnimation(self._card_effect, b"opacity")
         restore.setDuration(SEND_PULSE_HALF_MS)
         restore.setStartValue(SEND_PULSE_DIP_OPACITY)
         restore.setEndValue(1.0)
