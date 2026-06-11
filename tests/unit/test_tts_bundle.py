@@ -478,6 +478,19 @@ def test_tts_bundle_recommends_gptsovits_for_capable_nvidia(monkeypatch: pytest.
     assert tts_bundle.recommend_tts_bundle([GPUInfo("NVIDIA GeForce RTX 5060", 7.96)]).key == "gpt_sovits_nvidia50"
 
 
+def test_list_nvidia_gpus_swallows_which_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """shutil.which 抛异常时（如测试伪造 win32 平台导致 _winapi 缺失）应按未检测到 GPU 处理，而非崩溃。"""
+
+    def _boom(_name: str):  # type: ignore[no-untyped-def]
+        raise AttributeError("'NoneType' object has no attribute 'NeedCurrentDirectoryForExePath'")
+
+    monkeypatch.setattr(tts_bundle.shutil, "which", _boom)
+
+    assert tts_bundle.list_nvidia_gpus() == []
+    # 上层推荐逻辑不应被探测异常打断
+    assert tts_bundle.recommend_gpt_sovits_bundle() is not None
+
+
 def test_tts_bundle_label_includes_approx_size() -> None:
     assert tts_bundle.format_bundle_label(tts_bundle.GPT_SOVITS_NVIDIA50).endswith("（约 8.8 GB，仅 Windows）")
 
