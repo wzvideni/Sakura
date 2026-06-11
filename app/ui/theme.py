@@ -411,6 +411,39 @@ QTabBar::tab:selected {{
     color: {theme.accent_color};
     font-weight: 700;
 }}
+QListWidget#settingsNavList {{
+    background: {rgba(theme.panel_background_color, 179)};
+    border: 1px solid {rgba(theme.border_color, 138)};
+    border-radius: 8px;
+    padding: 6px;
+    outline: 0;
+    color: {theme.secondary_text_color};
+    font-size: 14px;
+}}
+QListWidget#settingsNavList::item {{
+    padding: 8px 12px;
+    margin: 2px 0;
+    border-radius: 6px;
+}}
+QListWidget#settingsNavList::item:hover {{
+    background: {rgba(theme.panel_background_color, 205)};
+}}
+QListWidget#settingsNavList::item:selected,
+QListWidget#settingsNavList::item:selected:active,
+QListWidget#settingsNavList::item:selected:!active {{
+    background: {theme.input_background_color};
+    color: {theme.accent_color};
+    font-weight: 700;
+}}
+QStackedWidget#settingsNavStack {{
+    background: transparent;
+    border: none;
+}}
+QWidget#settingsNavPage {{
+    background: {rgba(theme.panel_background_color, 179)};
+    border: 1px solid {rgba(theme.border_color, 138)};
+    border-radius: 8px;
+}}
 QScrollArea#settingsScrollArea {{
     background: transparent;
     border: none;
@@ -427,13 +460,21 @@ QGroupBox {{
     border-radius: 8px;
     color: {theme.secondary_text_color};
     font-weight: 700;
-    margin-top: 12px;
+    margin-top: 18px;
     padding-top: 10px;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
+    subcontrol-position: top left;
     left: 12px;
     padding: 0 6px;
+}}
+QGroupBox#advancedParamsGroup {{
+    margin-top: 22px;
+    padding-top: 12px;
+}}
+QGroupBox#advancedParamsGroup::title {{
+    padding: 2px 6px 3px 6px;
 }}
 QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QTableWidget, QComboBox {{
     background: {rgba(theme.input_background_color, 235)};
@@ -593,14 +634,18 @@ QCheckBox {{
     color: {mix(theme.text_color, "#ffffff", 0.08)};
     spacing: 8px;
 }}
-QCheckBox::indicator {{
+QCheckBox::indicator, QGroupBox::indicator {{
     width: 16px;
     height: 16px;
     border-radius: 4px;
     border: 1px solid {rgba(theme.primary_color, 173)};
     background: {theme.input_background_color};
 }}
-QCheckBox::indicator:checked {{
+QGroupBox#advancedParamsGroup::indicator {{
+    margin-top: 2px;
+    margin-bottom: 2px;
+}}
+QCheckBox::indicator:checked, QGroupBox::indicator:checked {{
     background: {theme.primary_color};
     border: 1px solid {theme.accent_color};
 }}
