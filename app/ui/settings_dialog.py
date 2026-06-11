@@ -235,6 +235,32 @@ class _NoWheelSlider(_NoWheelMixin, QSlider):
     pass
 
 
+class _ClickOnlyListWidget(QListWidget):
+    """左侧分类导航列表：仅响应左键单击切换页面。
+
+    禁用按住左键拖动时随鼠标连续切换当前项（默认 QListWidget 行为会误切页），
+    同时屏蔽右键（不选中、不弹上下文菜单），避免误触。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+
+    def mousePressEvent(self, event):  # type: ignore[no-untyped-def]
+        # 仅左键触发选中/切换，右键与中键直接忽略
+        if event.button() != Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):  # type: ignore[no-untyped-def]
+        # 按住左键拖动时不连续切换；无按键的悬停仍走默认逻辑以保留 hover 高亮
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+        super().mouseMoveEvent(event)
+
+
 class ModelComboBox(_NoWheelComboBox):
     """可编辑模型选择框，保留 QLineEdit 风格的 text/setText 兼容接口。"""
 
@@ -610,7 +636,7 @@ class SettingsDialog(QDialog):
     def _build_navigation(self, items: list[tuple[str, QWidget]]) -> QWidget:
         """左侧分类列表 + 右侧内容堆叠，替代原顶部横向 tab，便于纵向扩展分类。"""
         container = QWidget(self)
-        nav_list = QListWidget(container)
+        nav_list = _ClickOnlyListWidget(container)
         nav_list.setObjectName("settingsNavList")
         nav_list.setFixedWidth(140)
         nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

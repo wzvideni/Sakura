@@ -626,14 +626,14 @@ QCheckBox {{
     color: {mix(theme.text_color, "#ffffff", 0.08)};
     spacing: 8px;
 }}
-QCheckBox::indicator {{
+QCheckBox::indicator, QGroupBox::indicator {{
     width: 16px;
     height: 16px;
     border-radius: 4px;
     border: 1px solid {rgba(theme.primary_color, 173)};
     background: {theme.input_background_color};
 }}
-QCheckBox::indicator:checked {{
+QCheckBox::indicator:checked, QGroupBox::indicator:checked {{
     background: {theme.primary_color};
     border: 1px solid {theme.accent_color};
 }}
