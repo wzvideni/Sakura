@@ -458,6 +458,25 @@ def _format_time(timestamp: str) -> str:
         return timestamp[-8:] if len(timestamp) >= 8 else timestamp
 
 
+def _format_detail_for_display(detail: str) -> str:
+    """格式化 detail JSON 用于展示，将 bytes 字段转换为 KB。"""
+    if not detail:
+        return detail
+    try:
+        data = json.loads(detail)
+    except ValueError:
+        return detail
+    if not isinstance(data, dict):
+        return detail
+    formatted: dict = {}
+    for key, value in data.items():
+        if key == "bytes" and isinstance(value, (int, float)):
+            formatted[key] = f"{value / 1024:.1f} KB"
+        else:
+            formatted[key] = value
+    return json.dumps(formatted, ensure_ascii=False)
+
+
 def _record_tooltip(record: GuiLogRecord) -> str:
     lines = [
         f"时间：{record.timestamp}",
@@ -468,7 +487,7 @@ def _record_tooltip(record: GuiLogRecord) -> str:
     if record.text_preview:
         lines.append(f"文本：{record.text_preview}")
     if record.detail:
-        lines.append(f"详情：{record.detail}")
+        lines.append(f"详情：{_format_detail_for_display(record.detail)}")
     return "\n".join(lines)
 
 
@@ -539,9 +558,12 @@ def _detail_summary(detail: str) -> str:
         if value == "" or value == "<redacted>":
             continue
         used_keys.add(key)
-        value_text = str(value)
-        if len(value_text) > _MAX_DETAIL_SUMMARY_VALUE_CHARS:
-            value_text = f"{value_text[:_MAX_DETAIL_SUMMARY_VALUE_CHARS]}…"
+        if key == "bytes" and isinstance(value, (int, float)):
+            value_text = f"{value / 1024:.1f} KB"
+        else:
+            value_text = str(value)
+            if len(value_text) > _MAX_DETAIL_SUMMARY_VALUE_CHARS:
+                value_text = f"{value_text[:_MAX_DETAIL_SUMMARY_VALUE_CHARS]}…"
         pairs.append(f"{key}={value_text}")
     return " · ".join(pairs)
 

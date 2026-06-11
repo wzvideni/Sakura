@@ -987,6 +987,16 @@ QCheckBox::indicator:checked {{
     background: {theme.primary_color};
     border: 1px solid {theme.accent_color};
 }}
+QToolTip {{
+    background: {theme.panel_background_color};
+    color: {theme.text_color};
+    border: 1px solid {rgba(theme.border_color, 190)};
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-family: "Microsoft YaHei", "Yu Gothic UI", sans-serif;
+    font-size: 13px;
+    font-weight: normal;
+}}
 """
 
 
