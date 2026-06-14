@@ -4501,6 +4501,7 @@ def _configure_secondary_window(window) -> None:  # type: ignore[no-untyped-def]
         set_flag(Qt.WindowType.WindowTitleHint, True)
         set_flag(Qt.WindowType.WindowSystemMenuHint, True)
         set_flag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        set_flag(Qt.WindowType.WindowMaximizeButtonHint, True)
     # 顶层窗口默认应有任务栏按钮；保险起见在 Windows 上显式写入 WS_EX_APPWINDOW、
     # 清掉 WS_EX_TOOLWINDOW，确保最小化后能在任务栏单独点回来。
     if sys.platform == "win32":
